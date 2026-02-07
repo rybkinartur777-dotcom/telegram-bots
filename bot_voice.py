@@ -137,6 +137,7 @@ import shutil
 import concurrent.futures
 import re
 from pydub import AudioSegment, effects, silence
+from aiohttp import web
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -516,6 +517,62 @@ async def handle_message(message: Message):
 
 if __name__ == "__main__":
     async def main():
-        await dp.start_polling(bot)
+        from aiohttp import web
+        
+        print("[VOICE BOT] Starting webhook setup...")
+        
+        # Webhook settings
+        WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
+        WEBHOOK_PATH = f"/webhook/{TOKEN_VOICE}"
+        WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+        
+        # Web app setup
+        app = web.Application()
+        
+        async def handle_webhook(request):
+            """Handle incoming webhook requests"""
+            try:
+                print("[WEBHOOK] Received request")
+                update_data = await request.json()
+                print(f"[WEBHOOK] Processing update")
+                
+                from aiogram.types import Update
+                update = Update(**update_data)
+                await dp.feed_webhook_update(bot, update)
+                
+                print("[WEBHOOK] Update processed successfully")
+                return web.Response(text="OK")
+            except Exception as e:
+                print(f"[WEBHOOK ERROR] {e}")
+                import traceback
+                traceback.print_exc()
+                return web.Response(status=500)
+        
+        app.router.add_post(WEBHOOK_PATH, handle_webhook)
+        
+        async def health(request):
+            return web.Response(text="Voice Bot is running!")
+        
+        app.router.add_get("/", health)
+        app.router.add_get("/health", health)
+        
+        # Set webhook
+        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.set_webhook(WEBHOOK_URL)
+        print(f"[VOICE BOT] Webhook set to: {WEBHOOK_URL}")
+        
+        # Start server
+        PORT = int(os.getenv("PORT", 8080))
+        print(f"[VOICE BOT] Server starting on port {PORT}...")
+        
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        
+        print(f"[VOICE BOT] Server started on port {PORT}")
+        
+        # Keep running
+        await asyncio.Event().wait()
 
     asyncio.run(main())
