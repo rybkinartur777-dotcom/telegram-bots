@@ -3,5 +3,3 @@ aiohttp>=3.9.0
 python-dotenv>=1.0.0
 SpeechRecognition>=3.10.0
 pydub>=0.25.1
-openai-whisper>=20231117
-deepmultilingualpunctuation>=1.0.1
