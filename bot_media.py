@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from yt_dlp import YoutubeDL
 import shutil
 import subprocess
+from aiohttp import web
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -197,7 +198,7 @@ async def handle_message(message: Message):
             await message.reply(error_text)
 
 async def main():
-    from aiohttp import web
+    print("[MEDIA BOT] Starting webhook setup...")
     
     # Webhook settings
     WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
