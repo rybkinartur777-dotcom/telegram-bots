@@ -217,11 +217,11 @@ async def main():
         try:
             print("[WEBHOOK] Received request")
             update_data = await request.json()
-            print(f"[WEBHOOK] Update data: {update_data}")
+            print(f"[WEBHOOK] Processing update")
             
             from aiogram.types import Update
             update = Update(**update_data)
-            await dp.feed_update(bot, update)
+            await dp.feed_webhook_update(bot, update)
             
             print("[WEBHOOK] Update processed successfully")
             return web.Response(text="OK")
