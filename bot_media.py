@@ -19,6 +19,10 @@ from aiohttp import web
 # Загружаем переменные окружения из .env файла
 load_dotenv()
 
+print("[DEBUG] bot_media.py loaded successfully!")
+print(f"[DEBUG] TOKEN_MEDIA exists: {bool(os.getenv('TOKEN_MEDIA'))}")
+print(f"[DEBUG] RENDER_EXTERNAL_URL: {os.getenv('RENDER_EXTERNAL_URL', 'NOT SET')}")
+
 # ===== КОНФИГУРАЦИЯ =====
 TOKEN_MEDIA = os.getenv("TOKEN_MEDIA", "YOUR_TOKEN_HERE")  # Получите свой токен от @BotFather
 
