@@ -215,11 +215,20 @@ async def main():
     async def handle_webhook(request):
         """Handle incoming webhook requests"""
         try:
-            update = await request.json()
+            print("[WEBHOOK] Received request")
+            update_data = await request.json()
+            print(f"[WEBHOOK] Update data: {update_data}")
+            
+            from aiogram.types import Update
+            update = Update(**update_data)
             await dp.feed_update(bot, update)
+            
+            print("[WEBHOOK] Update processed successfully")
             return web.Response(text="OK")
         except Exception as e:
             print(f"[WEBHOOK ERROR] {e}")
+            import traceback
+            traceback.print_exc()
             return web.Response(status=500)
     
     app.router.add_post(WEBHOOK_PATH, handle_webhook)
