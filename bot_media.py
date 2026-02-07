@@ -197,8 +197,51 @@ async def handle_message(message: Message):
             await message.reply(error_text)
 
 async def main():
-    print("[MEDIA BOT] Started and ready for links!")
-    await dp.start_polling(bot)
+    from aiohttp import web
+    
+    # Webhook settings
+    WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
+    WEBHOOK_PATH = f"/webhook/{TOKEN_MEDIA}"
+    WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+    
+    # Web app setup
+    app = web.Application()
+    
+    async def handle_webhook(request):
+        """Handle incoming webhook requests"""
+        try:
+            update = await request.json()
+            await dp.feed_update(bot, update)
+            return web.Response(text="OK")
+        except Exception as e:
+            print(f"[WEBHOOK ERROR] {e}")
+            return web.Response(status=500)
+    
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    
+    # Health check endpoint
+    async def health(request):
+        return web.Response(text="Media Bot is running!")
+    
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    
+    # Set webhook
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_URL)
+    print(f"[MEDIA BOT] Webhook set to: {WEBHOOK_URL}")
+    
+    # Start web server
+    PORT = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    
+    print(f"[MEDIA BOT] Server started on port {PORT}")
+    
+    # Keep running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
