@@ -1,0 +1,204 @@
+
+import asyncio
+
+import os
+import tempfile
+import urllib.request
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import Message, FSInputFile, InputMediaPhoto
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramRetryAfter
+from yt_dlp import YoutubeDL
+import shutil
+import subprocess
+
+# Загружаем переменные окружения из .env файла
+load_dotenv()
+
+# ===== КОНФИГУРАЦИЯ =====
+TOKEN_MEDIA = os.getenv("TOKEN_MEDIA", "YOUR_TOKEN_HERE")  # Получите свой токен от @BotFather
+
+# Ограничение размера видео перед отправкой как "video" (в байтах)
+MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024  # ~50 MB
+
+# ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
+bot = Bot(token=TOKEN_MEDIA, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+welcome_text = (
+    "🌐 <b>Добро пожаловать в Media Bot!</b>\n\n"
+    "Я скачиваю контент с популярных платформ!\n\n"
+    "<b>Поддерживаемые сайты:</b>\n"
+    "• 📸 Instagram (фото, видео, карусели)\n"
+    "• 🎵 TikTok (видео, звук)\n"
+    "• 📌 Pinterest (фото)\n\n"
+    "<b>Как использовать:</b>\n"
+    "Просто пришлите ссылку на пост!"
+)
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    """Обработчик команды /start"""
+    try:
+        await message.answer(welcome_text)
+    except TelegramRetryAfter as e:
+        await asyncio.sleep(e.retry_after)
+        await message.answer(welcome_text)
+
+@dp.message(lambda message: message.text and ('http://' in message.text or 'https://' in message.text))
+async def handle_message(message: Message):
+    """Обработчик для ссылок на медиа"""
+    
+    allowed_domains = [
+        'instagram.com', 'www.instagram.com',
+        'pinterest.com', 'www.pinterest.com', 'pin.it',
+        'tiktok.com', 'www.tiktok.com'
+    ]
+    
+
+    # Универсальный поиск ссылки
+    url = None
+    if message.text and ('http://' in message.text or 'https://' in message.text):
+        url = message.text.strip()
+    elif getattr(message, 'reply_to_message', None) and getattr(message.reply_to_message, 'text', None):
+        txt = message.reply_to_message.text
+        if 'http://' in txt or 'https://' in txt:
+            url = txt.strip()
+    elif getattr(message, 'forward_from', None) and getattr(message, 'text', None):
+        txt = message.text
+        if 'http://' in txt or 'https://' in txt:
+            url = txt.strip()
+    # Можно добавить другие варианты поиска, если потребуется
+
+    if not url:
+        await message.reply("❌ Не найдена ссылка для обработки.")
+        return
+    
+    # Проверяем, есть ли разрешённый домен в ссылке
+    if not any(domain in url.lower() for domain in allowed_domains):
+        await message.reply("❌ Ссылка должна быть с Instagram, TikTok или Pinterest")
+        return
+
+    status_msg = await message.reply("⏳ Обработка ссылки, подождите...")
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            media_group = []
+
+            # Специальный блок для Pinterest — работаем с фото
+            if 'pin.it' in url or 'pinterest' in url.lower():
+                try:
+                    ydl_opts = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'skip_download': True,
+                    }
+                    with YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                    
+                    images = info.get('images', [])
+                    if not images:
+                        await status_msg.edit_text("❌ Не удалось найти фото в этом пине (возможно, приватный пост).")
+                        return
+                    
+                    for i, img in enumerate(images[:10]):
+                        img_url = img.get('url') or img.get('src') or img.get('original')
+                        if not img_url:
+                            continue
+                        filename = os.path.join(tmpdirname, f"pin_{i}.jpg")
+                        urllib.request.urlretrieve(img_url, filename)
+                        media_group.append(InputMediaPhoto(media=FSInputFile(filename)))
+                    
+                    if not media_group:
+                        await status_msg.edit_text("❌ Не удалось загрузить фото с Pinterest.")
+                        return
+                except Exception as e:
+                    await status_msg.edit_text(f"❌ Ошибка при обработке Pinterest: {str(e)}")
+                    return
+            else:
+                # Для TikTok/Instagram — скачиваем видео/фото
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'outtmpl': os.path.join(tmpdirname, '%(id)s.%(ext)s'),
+                    'format': 'bestvideo+bestaudio/best',
+                    'merge_output_format': 'mp4',
+                }
+                
+                with YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                # Ищем загруженные файлы
+                videos_found = []
+                for file in os.listdir(tmpdirname):
+                    file_path = os.path.join(tmpdirname, file)
+                    if file.lower().endswith(('.mp4', '.webm', '.mov')):
+                        videos_found.append(file_path)
+                
+                if not videos_found:
+                    await status_msg.edit_text("❌ Не удалось загрузить видео. Попробуйте другую ссылку.")
+                    return
+                
+                # Обрабатываем каждое видео
+                for file_path in videos_found:
+                    size = os.path.getsize(file_path)
+                    
+                    if size <= MAX_VIDEO_SIZE_BYTES:
+                        # Отправляем как видео
+                        await message.answer_video(video=FSInputFile(file_path), supports_streaming=True)
+                    else:
+                        # Пробуем транскодировать если ffmpeg есть
+                        ffmpeg_path = shutil.which('ffmpeg')
+                        sent = False
+                        
+                        if ffmpeg_path:
+                            for crf in (23, 26, 28):
+                                transcoded = os.path.join(tmpdirname, f"transcoded_{crf}.mp4")
+                                try:
+                                    subprocess.run([
+                                        ffmpeg_path, '-y', '-i', file_path,
+                                        '-c:v', 'libx264', '-crf', str(crf), '-preset', 'fast',
+                                        '-c:a', 'aac', '-b:a', '96k', transcoded
+                                    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    
+                                    if os.path.exists(transcoded):
+                                        new_size = os.path.getsize(transcoded)
+                                        if new_size <= MAX_VIDEO_SIZE_BYTES:
+                                            await message.answer_video(video=FSInputFile(transcoded), supports_streaming=True)
+                                            sent = True
+                                            break
+                                except Exception:
+                                    continue
+                        
+                        # Если не удалось сжать, отправляем как документ
+                        if not sent:
+                            await message.answer_document(document=FSInputFile(file_path))
+                    
+                    await status_msg.delete()
+                    return
+
+            # Отправляем фото (для Pinterest)
+            if media_group:
+                if len(media_group) == 1:
+                    photo_file = media_group[0].media
+                    await message.answer_photo(photo=photo_file)
+                else:
+                    await message.answer_media_group(media=media_group)
+                await status_msg.delete()
+
+    except Exception as e:
+        error_text = f"❌ Ошибка обработки: {str(e)}\nПопробуйте другую ссылку."
+        try:
+            await status_msg.edit_text(error_text)
+        except:
+            await message.reply(error_text)
+
+async def main():
+    print("[MEDIA BOT] Started and ready for links!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
