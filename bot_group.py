@@ -78,32 +78,33 @@ async def ask_angelina(prompt, history=None):
     if not client:
         return "Ой, у меня голова болит (нет ключа API)."
     
-    # 1. Формируем контекст
-    content = []
+    # 1. Формируем единый текст запроса
+    # (Вставляем системную инструкцию прямо в сообщение, это надежнее)
+    full_text_parts = [SYSTEM_PROMPT]
     
-    # Добавляем Системный Промпт + Базу Знаний
-    full_system_prompt = SYSTEM_PROMPT
     if KNOWLEDGE:
-        full_system_prompt += f"\n\n[[ВАЖНАЯ ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ]]:\n{KNOWLEDGE}"
+        full_text_parts.append(f"\n[[ТВОЯ БАЗА ЗНАНИЙ]]:\n{KNOWLEDGE}")
     
     if history:
         hist_text = "\n".join([f"{m['u']}: {m['t']}" for m in history])
-        content.append(f"История последних сообщений в чате:\n{hist_text}\n\n")
+        full_text_parts.append(f"\nИстория переписки:\n{hist_text}")
     
-    content.append(prompt)
+    full_text_parts.append(f"\nНовое сообщение: {prompt}")
     
-    # 2. Перебор моделей (Fallback strategy)
-    models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro"]
+    final_content = "\n\n".join(full_text_parts)
+    
+    # 2. Перебор моделей
+    # Используем названия без префиксов models/ (клиент сам добавит если надо)
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
     
     last_error = None
     for model_name in models_to_try:
         try:
             response = client.models.generate_content(
                 model=model_name, 
-                contents="\n".join(content),
+                contents=final_content,
                 config=types.GenerateContentConfig(
-                    system_instruction=full_system_prompt,
-                    temperature=0.85, # Чуть больше креатива
+                    temperature=0.8, # Живость
                 )
             )
             return response.text.strip()
@@ -113,7 +114,7 @@ async def ask_angelina(prompt, history=None):
             continue
             
     logger.error(f"ALL MODELS FAILED. Last error: {last_error}")
-    return "Что-то я подвисла... (Проблемы с сетью или ключом)"
+    return f"Что-то я подвисла... (Ошибка: {last_error})"
 
 # --- HANDLERS ---
 
