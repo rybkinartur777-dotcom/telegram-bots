@@ -78,8 +78,7 @@ async def ask_angelina(prompt, history=None):
     if not client:
         return "Ой, у меня голова болит (нет ключа API)."
     
-    # 1. Формируем единый текст запроса
-    # (Вставляем системную инструкцию прямо в сообщение, это надежнее)
+    # 1. Формируем текст
     full_text_parts = [SYSTEM_PROMPT]
     
     if KNOWLEDGE:
@@ -93,28 +92,18 @@ async def ask_angelina(prompt, history=None):
     
     final_content = "\n\n".join(full_text_parts)
     
-    # 2. Перебор моделей
-    # Используем названия без префиксов models/ (клиент сам добавит если надо)
-    models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro"]
-    
-    last_error = None
-    for model_name in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=model_name, 
-                contents=final_content,
-                config=types.GenerateContentConfig(
-                    temperature=0.8, # Живость
-                )
-            )
-            return response.text.strip()
-        except Exception as e:
-            # logger.warning(f"Model {model_name} failed: {e}")
-            last_error = e
-            continue
-            
-    logger.error(f"ALL MODELS FAILED. Last error: {last_error}")
-    return f"Что-то я подвисла... (Ошибка: {last_error})"
+    # 2. Делаем запрос (ТОЧНО КАК В bot_voice.py)
+    # Используем только Flash, так как он 100% работает с твоим ключом
+    try:
+        response = client.models.generate_content(
+            model="gemini-1.5-flash", 
+            contents=[final_content]  # Передаем как список
+            # config убираем, чтобы исключить ошибки совместимости
+        )
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Angelina GenAI Error: {e}")
+        return f"Что-то не так... (Ошибка: {e})"
 
 # --- HANDLERS ---
 
