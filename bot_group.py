@@ -56,31 +56,61 @@ SUMMARY_PROMPT = """
 
 # --- UTILS ---
 
+
+# --- KNOWLEDGE BASE ---
+KNOWLEDGE = ""
+try:
+    if os.path.exists("KNOWLEDGE_BASE.md"):
+        with open("KNOWLEDGE_BASE.md", "r", encoding="utf-8") as f:
+            KNOWLEDGE = f.read()
+            logger.info("Knowledge base loaded.")
+except Exception as e:
+    logger.warning(f"No knowledge base found: {e}")
+
+# --- UTILS ---
+
 async def ask_angelina(prompt, history=None):
     if not client:
         return "Ой, у меня голова болит (нет ключа API)."
     
-    try:
-        content = []
-        if history:
-            hist_text = "\n".join([f"{m['u']}: {m['t']}" for m in history])
-            content.append(f"История последних сообщений в чате:\n{hist_text}\n\n")
+    # Models to try in order
+    models = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro"]
+    
+    content = []
+    
+    # 1. System Prompt + Persona
+    sys_prompt = SYSTEM_PROMPT
+    if KNOWLEDGE:
+        sys_prompt += f"\n\nВОТ ТВОЯ БАЗА ЗНАНИЙ (ОТВЕЧАЙ ПО НЕЙ):\n{KNOWLEDGE}"
         
-        content.append(prompt)
-        
-        # Flash - идеально для быстрой болтовни
-        response = client.models.generate_content(
-            model="gemini-1.5-flash", 
-            contents="\n".join(content),
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                temperature=0.8, # Живость
+    # 2. History
+    if history:
+        hist_text = "\n".join([f"{m['u']}: {m['t']}" for m in history])
+        content.append(f"История последних сообщений в чате:\n{hist_text}\n\n")
+    
+    content.append(prompt)
+
+    last_error = None
+    for model_name in models:
+        try:
+            # logger.info(f"Trying {model_name}...")
+            response = client.models.generate_content(
+                model=model_name, 
+                contents="\n".join(content),
+                config=types.GenerateContentConfig(
+                    system_instruction=sys_prompt,
+                    temperature=0.8, # Живость
+                )
             )
-        )
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"GenAI Error: {e}")
-        return "Что-то я подвисла... Повтори?"
+            return response.text.strip()
+        except Exception as e:
+            # logger.warning(f"{model_name} failed: {e}")
+            last_error = e
+            continue
+            
+    logger.error(f"All models failed: {last_error}")
+    return "Что-то я подвисла... (Ошибка сети)"
+
 
 # --- HANDLERS ---
 
@@ -97,20 +127,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 2. Триггеры (когда отвечать)
     should_answer = False
     
-    # Имя (разные регистры)
-    triggers = ["ангелина", "ангелин", "angelina", "геля"]
-    text_lower = text.lower()
-    
-    if any(t in text_lower for t in triggers):
+    # В ЛИЧКЕ (Private) отвечаем ВСЕГДА
+    if msg.chat.type == "private":
         should_answer = True
+    else:
+        # В ГРУППЕ - только по триггерам
         
-    # Реплай на сообщение бота
-    if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
-        should_answer = True
+        # Имя (разные регистры)
+        triggers = ["ангелина", "ангелин", "angelina", "геля"]
+        text_lower = text.lower()
         
-    # Рандом (редко, 2%)
-    if not should_answer and len(text) > 15 and random.random() < 0.02:
-        should_answer = True
+        if any(t in text_lower for t in triggers):
+            should_answer = True
+            
+        # Реплай на сообщение бота
+        if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
+            should_answer = True
+            
+        # Рандом (редко, 2%)
+        if not should_answer and len(text) > 15 and random.random() < 0.02:
+            should_answer = True
         
     if should_answer:
         # Берем контекст (последние 15 сообщений)
