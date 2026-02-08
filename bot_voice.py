@@ -17,6 +17,8 @@ import concurrent.futures
 import re
 from pydub import AudioSegment, effects, silence
 from aiohttp import web
+import google.generativeai as genai
+import pathlib
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -42,6 +44,15 @@ else:
 
 # ===== CONFIG =====
 TOKEN_VOICE = os.getenv("TOKEN_VOICE", "YOUR_TOKEN_HERE")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+gemini_model = None
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Используем flash модель так как она быстрая и дешевая (бесплатная в лимитах)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    print("[WARNING] GEMINI_API_KEY not found! High quality recognition disabled.")
 
 
 # ===== UTILS =====
@@ -114,77 +125,100 @@ async def download_with_retries(file_obj, dest_path, attempts=3, delay=0.12):
 
 # ===== GOOGLE SPEECH =====
 
-def recognize_file_multilang(wav_path, languages=("ru-RU", "en-US"), timeout=12):
-    """
-    Распознавание через Google Speech Recognition (требует интернет, но бесплатно и мало памяти)
-    """
-    if not os.path.exists(wav_path):
-        return None, None, {}, {}
+# ===== RECOGNITION =====
 
-    recognizer = sr.Recognizer()
-    
-    # Настройки для улучшения
-    recognizer.energy_threshold = 300  
-    recognizer.dynamic_energy_threshold = True
-    recognizer.pause_threshold = 0.8
-    
-    audio_data = None
+def recognize_gemini(file_path):
+    """
+    Распознавание через Google Gemini (Бесплатно, качественно, с пунктуацией)
+    """
+    if not gemini_model:
+        return None, None
+
     try:
-        with sr.AudioFile(wav_path) as source:
-            # Calibrate explicitly
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio_data = recognizer.record(source)
-    except Exception as e:
-        print(f"[Speech] Failed to read audio: {e}")
-        return None, None, {}, {}
-
-    results = {}
-    scores = {}
-
-    def recognize_lang(lang):
-        try:
-            # recognize_google is synchronous and blocking
-            text = recognizer.recognize_google(audio_data, language=lang)
-            return lang, text
-        except sr.UnknownValueError:
-            return lang, None
-        except sr.RequestError as e:
-            print(f"[Google Speech Error] {e}")
-            return lang, None
-        except Exception as e:
-            print(f"[Speech Error] {e}")
-            return lang, None
-
-    # Run in parallel in threads
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(recognize_lang, lang): lang for lang in languages}
-        for future in concurrent.futures.as_completed(futures):
-            res_lang, res_text = future.result()
-            results[res_lang] = res_text
-            
-            # Simple scoring
-            if res_text:
-                # Длиннее текст -> вероятно лучше
-                scores[res_lang] = len(res_text)
-            else:
-                scores[res_lang] = 0
-
-    # Выбираем лучший
-    best_lang = None
-    best_score = -1
-    best_text = None
-
-    for lang, score in scores.items():
-        if score > best_score:
-            best_score = score
-            best_lang = lang
-            best_text = results[lang]
-            
-    # Если оба ноль
-    if best_score == 0:
-        return None, None, results, scores
+        # Uploading file to Gemini
+        # Note: In production you might want to manage file deletion lifecycle better
+        # But for this bot standard upload/process is fine
+        print(f"[Gemini] Uploading {file_path}...")
+        sample_file = genai.upload_file(path=file_path, display_name="Voice Message")
         
-    return best_text, best_lang, results, scores
+        # Poll for processing completion
+        while sample_file.state.name == "PROCESSING":
+            time.sleep(1)
+            sample_file = genai.get_file(sample_file.name)
+            
+        if sample_file.state.name == "FAILED":
+            print("[Gemini] File processing failed.")
+            return None, None
+            
+        # Generate content
+        response = gemini_model.generate_content([
+            "Transcribe this audio file exactly as spoken. Punctuate properly. Do not add any other text.",
+            sample_file
+        ])
+        
+        # Cleanup
+        try:
+            genai.delete_file(sample_file.name)
+        except:
+            pass
+            
+        text = response.text.strip()
+        # Simple language detection based on text
+        # (Gemini doesn't return language code directly in simple response)
+        # We'll assume successful recognition implies valid language
+        # You could ask it to output JSON with language, but let's keep it simple
+        lang = "detected" 
+        
+        return text, lang
+            
+    except Exception as e:
+        print(f"[Gemini Error] {e}")
+        return None, None
+
+def recognize_google(wav_path, lang="ru-RU"):
+    """
+    Fallback: Google Speech Recognition (Old API)
+    """
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 300
+    
+    with sr.AudioFile(wav_path) as source:
+        audio_data = recognizer.record(source)
+        
+    try:
+        text = recognizer.recognize_google(audio_data, language=lang)
+        return text
+    except sr.UnknownValueError:
+        return None
+    except Exception as e:
+        print(f"[Google Error] {e}")
+        return None
+
+def recognize_speech(file_path, wav_path):
+    """
+    Smart recognition: Try Gemini (Free High Quality) first, then Google (Legacy)
+    """
+    # 1. Try Gemini (High quality + punctuation + FREE)
+    if gemini_model:
+        print("[Speech] Trying Gemini...")
+        text, lang = recognize_gemini(file_path) # Use original file (ogg/mp3) usually better
+        if text:
+            return text, lang, "gemini"
+            
+    # 2. Fallback to Google Legacy
+    print("[Speech] Fallback to Google Legacy...")
+    
+    # Try Russian first
+    text = recognize_google(wav_path, "ru-RU")
+    if text:
+        return text, "ru", "google"
+        
+    # Try English
+    text = recognize_google(wav_path, "en-US")
+    if text:
+        return text, "en", "google"
+        
+    return None, None, None
 
 
 # ===== BOT =====
@@ -237,16 +271,25 @@ async def handle_message(message: Message):
                 await status_msg.edit_text("❌ Failed to convert audio.")
                 return
                 
+
             # 3. Recognize
-            text, lang, _, _ = recognize_file_multilang(wav_path)
+            # Pass original input_path for Gemini (it supports ogg/mp3 directly) and wav_path for legacy
+            text, lang, engine = recognize_speech(input_path, wav_path)
             
             if text:
-                # Add punctuation (simple)
-                text = add_punctuation(text)
+                # Gemini adds punctuation automatically
+                if engine == "google":
+                    text = add_punctuation(text)
                 
                 response = f"🗣 <b>{text}</b>"
-                if lang == "en-US":
-                    response += "\n\n🇬🇧 English detected"
+                
+                # Add metadata
+                footer = []
+                if engine == "gemini":
+                     footer.append("✨ Gemini (HQ)")
+                
+                if footer:
+                    response += "\n\n" + " | ".join(footer)
                 
                 await status_msg.edit_text(response)
             else:
