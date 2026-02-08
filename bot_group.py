@@ -144,23 +144,40 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = await ask_angelina(prompt, history=list(CHAT_HISTORY))
     await m.edit_text(summary)
 
+from telegram.error import Conflict, NetworkError
+
 # --- MAIN ---
 def main():
     if not TOKEN_GROUP:
         logger.error("TOKEN_GROUP not set.")
         return
 
-    try:
-        app = ApplicationBuilder().token(TOKEN_GROUP).build()
-        
-        app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Привет! Я Ангелина.")))
-        app.add_handler(CommandHandler("summary", cmd_summary))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        logger.info("Angelina Started Polling...")
-        app.run_polling()
-    except Exception as e:
-        logger.critical(f"Main Error: {e}")
+    while True:
+        try:
+            app = ApplicationBuilder().token(TOKEN_GROUP).build()
+            
+            app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Привет! Я Ангелина.")))
+            app.add_handler(CommandHandler("summary", cmd_summary))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            
+            logger.info("Angelina Started Polling...")
+            # drop_pending_updates=True помогает избежать глюков при рестарте
+            # allowed_updates=["message"] экономит трафик
+            app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
+            
+        except Conflict:
+            logger.warning("Conflict error (another bot instance is running). Waiting 10s...")
+            import time
+            time.sleep(10)
+        except NetworkError:
+            logger.warning("Network error. Retrying in 5s...")
+            import time
+            time.sleep(5)
+        except Exception as e:
+            logger.critical(f"Critical Main Error: {e}")
+            import time
+            time.sleep(10) # Ждем перед рестартом, чтобы не спамить логами
+
 
 if __name__ == "__main__":
     main()
