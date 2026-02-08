@@ -64,20 +64,30 @@ async def recognize_gemini(file_path):
 
         prompt = "Transcribe this audio exactly as spoken. Punctuated properly. Do not add any other text."
         
-        # Вызов модели
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=[
-                types.Part.from_text(text=prompt),
-                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
-            ]
-        )
+        # Список моделей для перебора (если одна не сработает, пробуем следующую)
+        models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro"]
         
-        text = response.text.strip() if response.text else ""
-        return text, "detected"
-
-    except Exception as e:
-        logger.error(f"[Gemini Error (New Lib)] {e}")
+        last_error = None
+        for model_name in models_to_try:
+            try:
+                # logger.info(f"Attempting with model: {model_name}")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        types.Part.from_text(text=prompt),
+                        types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+                    ]
+                )
+                text = response.text.strip() if response.text else ""
+                return text, "detected"
+            except Exception as e:
+                # logger.warning(f"Model {model_name} failed: {e}")
+                last_error = e
+                continue
+        
+        # Если ни одна не сработала
+        if last_error:
+            logger.error(f"[Gemini All Models Failed] Last error: {last_error}")
         return None, None
 
 def recognize_google(wav_path, lang="ru-RU"):
