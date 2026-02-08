@@ -1,360 +1,241 @@
-# Force redeploy trigger (new library migration V2)
+
 import asyncio
 import os
-import tempfile
 import logging
-import re
+import tempfile
 from pathlib import Path
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters, Application
+from aiohttp import web
 from dotenv import load_dotenv
 
 import speech_recognition as sr
-from pydub import AudioSegment, effects, silence 
+from pydub import AudioSegment
 
 # Новая библиотека Google GenAI
 from google import genai
 from google.genai import types
 
-# Загружаем переменные окружения из .env файла
+# Загрузка переменных
 load_dotenv()
-
 TOKEN_VOICE = os.getenv("TOKEN_VOICE")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
+PORT = int(os.getenv("PORT", 10000))
 
-# Инициализация клиента (новая библиотека)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Инициализация клиента Google GenAI
 client = None
 if GEMINI_API_KEY:
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
-#         print("[Gemini] Client initialized successfully.")
+        logger.info("[Gemini] Client initialized successfully.")
     except Exception as e:
-        print(f"[Gemini Error] Initialization failed: {e}")
+        logger.error(f"[Gemini Error] Initialization failed: {e}")
 else:
-    print("[WARNING] GEMINI_API_KEY not found! High quality recognition disabled.")
-
-
-# ===== FFMPEG SETUP =====
-FFMPEG_PATH = None
-if os.name == 'nt':
-    local_ffmpeg = os.path.join(os.path.dirname(__file__), "ffmpeg", "ffmpeg.exe")
-    if os.path.exists(local_ffmpeg):
-        FFMPEG_PATH = local_ffmpeg
-else:
-    FFMPEG_PATH = shutil.which("ffmpeg")
-
-if FFMPEG_PATH:
-    print(f"[FFmpeg] Using: {FFMPEG_PATH}")
-    # Для pydub и speech_recognition настройки
-    AudioSegment.converter = FFMPEG_PATH
-    AudioSegment.ffmpeg = FFMPEG_PATH
-    AudioSegment.ffprobe = FFMPEG_PATH
-else:
-    print("[WARNING] FFmpeg not found! Voice processing might fail.")
-
+    logger.warning("[WARNING] GEMINI_API_KEY not found!")
 
 # ===== UTILS =====
-TRANSLIT_DICT = {
-    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh',
-    'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
-    'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts',
-    'ч': 'ch', 'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': "'", 'э': 'e', 'ю': 'yu',
-    'я': 'ya',
-    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo', 'Ж': 'Zh',
-    'З': 'Z', 'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'М': 'M', 'Н': 'N', 'О': 'O',
-    'П': 'P', 'Р': 'R', 'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'H', 'Ц': 'Ts',
-    'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Sch', 'Ъ': '"', 'Ы': 'Y', 'Ь': "'", 'Э': 'E', 'Ю': 'Yu',
-    'Я': 'Ya'
-}
 
-def transliterate(text):
-    if not text: return ""
-    result = []
-    for char in text:
-        result.append(TRANSLIT_DICT.get(char, char))
-    return "".join(result)
-
-def add_punctuation(text):
-    """
-    Простая эвристика для пунктуации, так как нейросети тяжелые.
-    """
-    if not text: return ""
-    
-    # Capitalize first letter
-    text = text[0].upper() + text[1:]
-    
-    # Add dot at end if missing
-    if text[-1] not in ".!?":
-        text += "."
-        
-    return text
-
-def convert_to_wav(input_file, output_file):
-    """Convert any audio to WAV 16000Hz mono using ffmpeg"""
-    try:
-        command = [
-            FFMPEG_PATH if FFMPEG_PATH else "ffmpeg",
-            "-y",
-            "-i", input_file,
-            "-ar", "16000",
-            "-ac", "1",
-            output_file
-        ]
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except Exception as e:
-        print(f"[FFmpeg Error] {e}")
-        return False
-
-async def download_with_retries(file_obj, dest_path, attempts=3, delay=0.12):
-    for i in range(attempts):
-        try:
-            await bot.download(file_obj, destination=dest_path)
-            return True
-        except TelegramRetryAfter as e:
-            wait_time = e.retry_after
-            print(f"[Telegram] Rate limit hit. Waiting {wait_time}s...")
-            await asyncio.sleep(wait_time)
-        except Exception as e:
-            print(f"[Download Error] Attempt {i+1}/{attempts}: {e}")
-            await asyncio.sleep(delay)
-    return False
-
-
-# ===== GOOGLE SPEECH =====
-
-# ===== RECOGNITION =====
-
-def recognize_gemini(file_path):
-    """
-    Распознавание через Google Gemini (Бесплатно, качественно, с пунктуацией)
-    """
-    Распознавание через новый Gemini API (v2 Client).
-    """
+async def recognize_gemini(file_path):
+    """Распознавание через новый Gemini API (v2 Client)."""
     if not client:
         return None, None
 
     try:
-        # Читаем файл как байты
+        # Читаем файл байтами
         with open(file_path, "rb") as f:
-            audio_data = f.read()
+            audio_bytes = f.read()
 
-        # Новый формат запроса (Part с MIME типом)
-        # Для ogg (voice note) используем audio/ogg
+        # Определяем MIME
+        file_str = str(file_path).lower()
         mime_type = "audio/ogg" 
-        if file_path.endswith(".mp3"):
+        if file_str.endswith(".mp3"):
             mime_type = "audio/mp3"
-        elif file_path.endswith(".wav"):
+        elif file_str.endswith(".wav"):
             mime_type = "audio/wav"
 
-        # Формируем контент
         prompt = "Transcribe this audio exactly as spoken. Punctuated properly. Do not add any other text."
         
+        # Вызов модели
         response = client.models.generate_content(
             model="gemini-1.5-flash",
-            contents=[prompt, types.Part.from_bytes(data=audio_data, mime_type=mime_type)]
+            contents=[
+                types.Part.from_text(text=prompt),
+                types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+            ]
         )
         
         text = response.text.strip() if response.text else ""
-        lang = "detected" 
-        
-        return text, lang
-            
+        return text, "detected"
+
     except Exception as e:
-        print(f"[Gemini Error] {e}")
+        logger.error(f"[Gemini Error (New Lib)] {e}")
         return None, None
 
 def recognize_google(wav_path, lang="ru-RU"):
-    """
-    Fallback: Google Speech Recognition (Old API)
-    """
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 300
-    
-    with sr.AudioFile(wav_path) as source:
-        audio_data = recognizer.record(source)
-        
+    """Старый добрый Google Speech"""
+    r = sr.Recognizer()
     try:
-        text = recognizer.recognize_google(audio_data, language=lang)
-        return text
-    except sr.UnknownValueError:
-        return None
-    except Exception as e:
-        print(f"[Google Error] {e}")
+        with sr.AudioFile(str(wav_path)) as source:
+            audio = r.record(source)
+        return r.recognize_google(audio, language=lang)
+    except:
         return None
 
-def recognize_speech(file_path, wav_path):
-    """
-    Умный выбор движка:
-    1. Gemini (HQ, пунктуация, бесплатно)
-    2. Google Speech (Legacy, запасной вариант)
-    """
-    # 1. Пробуем Gemini (если есть ключ)
+async def recognize_speech(file_path, wav_path):
+    """Диспетчер распознавания"""
+    # 1. Gemini
     if client:
-        print("[Speech] Trying Gemini v2...")
-        text, lang = recognize_gemini(file_path) # Для войсов (.oga) Gemini понимает
+        logger.info(f"Trying Gemini for {file_path}")
+        text, lang = await recognize_gemini(file_path)
         if text:
-            return text, lang, "gemini"
-        # Если Gemini вернул None (ошибка), идем дальше...2. Fallback to Google Legacy
-    print("[Speech] Fallback to Google Legacy...")
+            return text, "gemini"
     
-    # Try Russian first
-    text = recognize_google(wav_path, "ru-RU")
-    if text:
-        return text, "ru", "google"
-        
-    # Try English
-    text = recognize_google(wav_path, "en-US")
-    if text:
-        return text, "en", "google"
-        
-    return None, None, None
-
-
-# ===== BOT =====
-bot = Bot(token=TOKEN_VOICE, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-
-@dp.message(CommandStart())
-async def cmd_start(message: Message):
-    await message.answer("Voice Bot ready!\nSend me voice messages, audio files, or video notes.")
-
-@dp.message()
-async def handle_message(message: Message):
-    """Handle voice messages, audio files, and video notes"""
+    # 2. Google Fallback
+    logger.info("Fallback to Google Legacy")
+    loop = asyncio.get_running_loop()
     
+    text = await loop.run_in_executor(None, recognize_google, wav_path, "ru-RU") 
+    if text:
+        return text, "google"
+        
+    text = await loop.run_in_executor(None, recognize_google, wav_path, "en-US")
+    if text:
+        return text, "google"
+        
+    return None, None
+
+def add_punctuation(text):
+    if not text: return text
+    t = text.capitalize()
+    if not t.endswith((".", "!", "?")): t += "."
+    return t
+
+# ===== BOT LOGIC =====
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Voice Bot V2 (New Lib) ready!\nSend me voice messages.")
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = await update.message.reply_text("🎧 Listening...")
     try:
-        if message.voice:
-            file_id = message.voice.file_id
-            duration = message.voice.duration
-            file_type = "voice"
-        elif message.audio:
-            file_id = message.audio.file_id
-            duration = message.audio.duration
-            file_type = "audio"
-        elif message.video_note:
-            file_id = message.video_note.file_id
-            duration = message.video_note.duration
-            file_type = "video_note"
-        else:
-            return  # Not interested
+        voice = update.message.voice or update.message.audio or update.message.video_note or update.message.document
+        if not voice: return
 
-        if duration and duration > 300: # 5 min limit
-            await message.reply("Too long! Max 5 minutes.")
-            return
-
-        status_msg = await message.reply("🎧 Processing...")
+        file_id = voice.file_id
+        new_file = await context.bot.get_file(file_id)
         
         with tempfile.TemporaryDirectory() as temp_dir:
-            # 1. Download
-            file_info = await bot.get_file(file_id)
-            original_ext = os.path.splitext(file_info.file_path)[1] or ".ogg"
-            input_path = os.path.join(temp_dir, f"input{original_ext}")
+            temp_path = Path(temp_dir)
             
-            if not await download_with_retries(file_id, input_path):
-                await status_msg.edit_text("❌ Failed to download.")
-                return
-
-            # 2. Convert to WAV
-            wav_path = os.path.join(temp_dir, "audio.wav")
-            if not convert_to_wav(input_path, wav_path):
-                await status_msg.edit_text("❌ Failed to convert audio.")
-                return
-                
-
-            # 3. Recognize
-            text, lang, engine = recognize_speech(input_path, wav_path)
+            # Determine extension
+            ext = ".oga"
+            if update.message.audio: ext = ".mp3"
+            elif update.message.video_note: ext = ".mp4"
+            
+            input_path = temp_path / f"voice{ext}"
+            wav_path = temp_path / "audio.wav"
+            
+            await new_file.download_to_drive(input_path)
+            
+            # Convert to WAV (always needed for fallback)
+            # Use pydub to convert input to wav
+            sound = AudioSegment.from_file(str(input_path))
+            sound.export(str(wav_path), format="wav")
+            
+            text, engine = await recognize_speech(input_path, wav_path)
             
             if text:
-                # Gemini adds punctuation automatically
+                # Format response
                 if engine == "google":
                     text = add_punctuation(text)
                 
-                response = f"🗣 <b>{text}</b>"
-                
-                # Add metadata
-                footer = []
+                resp = f"🗣 <b>{text}</b>"
                 if engine == "gemini":
-                     footer.append("✨ Gemini (HQ)")
+                    resp += "\n\n✨ Gemini (HQ)"
                 
-                if footer:
-                    response += "\n\n" + " | ".join(footer)
-                
-                await status_msg.edit_text(response)
+                await status.edit_text(resp, parse_mode="HTML")
             else:
-                # Если вернулась пустота — значит совсем беда
-                await status_msg.edit_text("❌ Не удалось распознать речь (проверьте логи).")
-                
-    except Exception as e:
-        print(f"[Error] {e}")
-        try:
-            await message.reply("Error processing voice.")
-        except:
-            pass
+                await status.edit_text("❌ Could not recognize speech.")
 
+    except Exception as e:
+        logger.error(f"Error handling voice: {e}")
+        await status.edit_text(f"⚠️ Error: {str(e)}")
+
+# ===== WEB SERVER =====
+
+async def telegram_webhook(request):
+    """Handle incoming Telegram updates via Webhook"""
+    bot_app = request.app['bot_app']
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot_app.bot)
+        await bot_app.process_update(update)
+        return web.Response(text="OK")
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return web.Response(text="Error", status=500)
+
+
+def init_app():
+    """Initialize Aiohttp App with Bot context (Sync wrapper)"""
+    # 1. Bot App (Sync builder part)
+    builder = ApplicationBuilder().token(TOKEN_VOICE)
+    application = builder.build()
+    
+    # Handlers
+    application.add_handler(MessageHandler(filters.COMMAND, start))
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE | filters.Document.AUDIO, handle_voice))
+    
+    # 2. Web App
+    app = web.Application()
+    app['bot_app'] = application
+    
+    # Routes
+    webhook_path = f"/webhook/{TOKEN_VOICE}"
+    
+    async def webhook_handler(request):
+        try:
+            bot_app = request.app['bot_app']
+            data = await request.json()
+            update = Update.de_json(data, bot_app.bot)
+            await bot_app.process_update(update)
+            return web.Response(text="OK")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            return web.Response(text="Error", status=500)
+
+    app.router.add_post(webhook_path, webhook_handler)
+    app.router.add_get("/", lambda r: web.Response(text="Bot is running"))
+    app.router.add_get("/health", lambda r: web.Response(text="OK"))
+
+    # Lifecycle
+    async def on_startup(app):
+        webhook_url = f"{RENDER_EXTERNAL_URL}{webhook_path}"
+        logger.info(f"Setting webhook to: {webhook_url}")
+        await application.bot.set_webhook(webhook_url)
+        await application.initialize()
+        await application.start()
+
+    async def on_shutdown(app):
+        await application.stop()
+        await application.shutdown()
+
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_shutdown)
+    
+    return app
 
 if __name__ == "__main__":
-    async def main():
-        from aiohttp import web
-        
-        print("[VOICE BOT] Starting webhook setup...")
-        
-        # Webhook settings
-        WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
-        WEBHOOK_PATH = f"/webhook/{TOKEN_VOICE}"
-        WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
-        
-        # Web app setup
-        app = web.Application()
-        
-        async def handle_webhook(request):
-            """Handle incoming webhook requests"""
-            try:
-                # print("[WEBHOOK] Received request")
-                update_data = await request.json()
-                
-                from aiogram.types import Update
-                update = Update(**update_data)
-                
-                # Run in background task to not block webhook response
-                asyncio.create_task(dp.feed_webhook_update(bot, update))
-                
-                return web.Response(text="OK")
-            except Exception as e:
-                print(f"[WEBHOOK ERROR] {e}")
-                import traceback
-                traceback.print_exc()
-                return web.Response(status=500)
-        
-        app.router.add_post(WEBHOOK_PATH, handle_webhook)
-        
-        async def health(request):
-            return web.Response(text="Voice Bot is running!")
-        
-        app.router.add_get("/", health)
-        app.router.add_get("/health", health)
-        
-        # Set webhook
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            await bot.set_webhook(WEBHOOK_URL)
-            print(f"[VOICE BOT] Webhook set to: {WEBHOOK_URL}")
-        except Exception as e:
-             print(f"[WEBHOOK SET ERROR] {e}")
-        
-        # Start server
-        PORT = int(os.getenv("PORT", 10000))
-        print(f"[VOICE BOT] Server starting on port {PORT}...")
-        
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", PORT)
-        await site.start()
-        
-        print(f"[VOICE BOT] Server started on port {PORT}")
-        
-        # Keep running
-        await asyncio.Event().wait()
-
-    asyncio.run(main())
+    # Start web server
+    logging.basicConfig(level=logging.INFO)
+    app = init_app()
+    web.run_app(app, port=PORT)
