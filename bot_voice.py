@@ -49,8 +49,8 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 gemini_model = None
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Используем проверенную модель
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    # Используем самую стабильную модель
+    gemini_model = genai.GenerativeModel('gemini-pro')
 else:
     print("[WARNING] GEMINI_API_KEY not found! High quality recognition disabled.")
 
