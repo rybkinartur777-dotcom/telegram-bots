@@ -40,70 +40,62 @@ CHAT_HISTORY = deque(maxlen=200)
 # --- PERSONA ---
 SYSTEM_PROMPT = """
 Тебя зовут Ангелина. Ты девушка, 23 года.
-Ты находишься в чате telegram с друзьями/коллегами.
-Твоя задача: общаться как живой человек. Не веди себя как робот-ассистент.
-- Ты можешь шутить, сарказмировать (по-доброму), отвечать на вопросы.
-- Если спрашивают что-то умное/техническое — включай режим эксперта и отвечай подробно.
-- Если спрашивают просто "как дела" — отвечай легко.
-- Не используй фразы "Как искусственный интеллект...", "Я языковая модель...". Это запрещено.
+Ты находишься в чате telegram.
+Твоя задача: общаться как живой человек, подруга.
+- Ты можешь шутить, сарказмировать (по-доброму).
+- Если спрашивают что-то умное — отвечай как эксперт.
+- Не используй фразы "Как искусственный интеллект".
 - Твой стиль: дружелюбный, но с характером.
-"""
-
-SUMMARY_PROMPT = """
-Прочитай переписку ниже и расскажи, что тут происходило.
-Стиль: как будто ты рассказываешь подруге/другу последние сплетни чата.
-Выдели главное: кто что сказал, смешные моменты, итоги.
 """
 
 # --- KNOWLEDGE BASE ---
 KNOWLEDGE = ""
 try:
-    # Ищем файл рядом со скриптом
     base_path = os.path.dirname(os.path.abspath(__file__))
     kb_path = os.path.join(base_path, "KNOWLEDGE_BASE.md")
-    
     if os.path.exists(kb_path):
         with open(kb_path, "r", encoding="utf-8") as f:
             KNOWLEDGE = f.read()
-            logger.info("Knowledge base loaded successfully.")
-    else:
-        logger.warning(f"KNOWLEDGE_BASE.md not found at {kb_path}")
+            logger.info("Knowledge base loaded.")
 except Exception as e:
-    logger.warning(f"Failed to read knowledge base: {e}")
+    logger.warning(f"No knowledge base: {e}")
 
 
 # --- UTILS ---
 
 async def ask_angelina(prompt, history=None):
+    """
+    Запрос к Gemini. Максимально простой и надежный (как в voice bot).
+    """
     if not client:
         return "Ой, у меня голова болит (нет ключа API)."
     
-    # 1. Формируем текст
-    full_text_parts = [SYSTEM_PROMPT]
+    # 1. Собираем весь текст в один большой кусок (Prompt Engineering)
+    # Это самый надежный способ для всех моделей.
+    
+    full_text = f"{SYSTEM_PROMPT}\n\n"
     
     if KNOWLEDGE:
-        full_text_parts.append(f"\n[[ТВОЯ БАЗА ЗНАНИЙ]]:\n{KNOWLEDGE}")
+        full_text += f"[[ТВОЯ БАЗА ЗНАНИЙ]]:\n{KNOWLEDGE}\n\n"
     
     if history:
         hist_text = "\n".join([f"{m['u']}: {m['t']}" for m in history])
-        full_text_parts.append(f"\nИстория переписки:\n{hist_text}")
+        full_text += f"История переписки:\n{hist_text}\n\n"
     
-    full_text_parts.append(f"\nНовое сообщение: {prompt}")
+    full_text += f"Новое сообщение: {prompt}"
     
-    final_content = "\n\n".join(full_text_parts)
-    
-    # 2. Делаем запрос (ТОЧНО КАК В bot_voice.py)
-    # Используем только Flash, так как он 100% работает с твоим ключом
+    # 2. Отправляем запрос
+    # Используем 'gemini-1.5-flash' так как он проверен и работает.
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash", 
-            contents=[final_content]  # Передаем как список
-            # config убираем, чтобы исключить ошибки совместимости
+            model="gemini-1.5-flash",
+            contents=[full_text],
+            # config не используем, чтобы избежать ошибок версий
         )
         return response.text.strip()
     except Exception as e:
-        logger.error(f"Angelina GenAI Error: {e}")
-        return f"Что-то не так... (Ошибка: {e})"
+        logger.error(f"GenAI Request Failed: {e}")
+        return f"Что-то пошло не так... (Error: {e})"
 
 # --- HANDLERS ---
 
@@ -114,71 +106,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text
     user = update.effective_user.first_name or "Anon"
     
-    # 1. Запоминаем (Thread-safe append)
+    # 1. Запоминаем
     CHAT_HISTORY.append({"u": user, "t": text})
     
-    # 2. Логика ответа
+    # 2. Решаем, отвечать или нет
     should_answer = False
     
-    # В ЛИЧКЕ (Private) — всегда отвечаем
+    # В ЛИЧКЕ — всегда
     if msg.chat.type == "private":
         should_answer = True
     else:
-        # В ГРУППЕ — по триггерам
-        triggers = ["ангелина", "ангелин", "angelina", "геля", "ангел"]
-        text_lower = text.lower()
-        
-        # Если позвали по имени
-        if any(t in text_lower for t in triggers):
+        # В ГРУППЕ — по имени или реплаю
+        triggers = ["ангелина", "ангелин", "angelina", "геля"]
+        if any(t in text.lower() for t in triggers):
             should_answer = True
             
-        # Если ответили на сообщение бота
         if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
             should_answer = True
             
-        # Рандом (1%)
+        # Рандом 1%
         if not should_answer and len(text) > 20 and random.random() < 0.01:
             should_answer = True
 
     if should_answer:
-        # Индикатор "печатает..."
         await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
         
-        # Контекст (последние 15 сообщений)
-        recent = list(CHAT_HISTORY)[-15:]
+        # Контекст: последние 10 сообщений
+        recent = list(CHAT_HISTORY)[-10:]
         answer = await ask_angelina(f"Сообщение от {user}: {text}", history=recent)
         
         if answer:
             await msg.reply_text(answer)
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(CHAT_HISTORY) < 3:
-        await update.message.reply_text("Тут пока слишком тихо, нечего рассказывать.")
-        return
-        
-    m = await update.message.reply_text("Так-с, сейчас вспомню... 💅")
-    summary = await ask_angelina(SUMMARY_PROMPT, history=list(CHAT_HISTORY))
-    await m.edit_text(summary, parse_mode="Markdown")
+    m = await update.message.reply_text("Читаю переписку... 🧐")
+    prompt = "Прочитай историю выше и сделай краткий смешной пересказ (саммери) того, что обсуждали."
+    summary = await ask_angelina(prompt, history=list(CHAT_HISTORY))
+    await m.edit_text(summary)
 
 # --- MAIN ---
 def main():
     if not TOKEN_GROUP:
-        logger.error("TOKEN_GROUP not found in env! Exiting.")
+        logger.error("TOKEN_GROUP not set.")
         return
 
     try:
         app = ApplicationBuilder().token(TOKEN_GROUP).build()
         
-        app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Приветики! Я Ангелина. 😘")))
+        app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Привет! Я Ангелина.")))
         app.add_handler(CommandHandler("summary", cmd_summary))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("Angelina Started Polling...")
         app.run_polling()
     except Exception as e:
-        logger.critical(f"Critical Error in Main Loop: {e}")
-        # Не выходим сразу, чтобы run.py мог видеть ошибку
-        raise e
+        logger.critical(f"Main Error: {e}")
 
 if __name__ == "__main__":
     main()
