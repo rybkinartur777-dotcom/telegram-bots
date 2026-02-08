@@ -3,6 +3,7 @@ import asyncio
 import os
 import logging
 import random
+import sys
 from collections import deque
 from dotenv import load_dotenv
 
@@ -17,14 +18,14 @@ load_dotenv()
 TOKEN_GROUP = os.getenv("TOKEN_GROUP")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Логирование
+# Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - [Angelina] - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- CLIENT ---
+# --- CLIENT SETUP ---
 client = None
 if GEMINI_API_KEY:
     try:
@@ -42,9 +43,9 @@ SYSTEM_PROMPT = """
 Ты находишься в чате telegram с друзьями/коллегами.
 Твоя задача: общаться как живой человек. Не веди себя как робот-ассистент.
 - Ты можешь шутить, сарказмировать (по-доброму), отвечать на вопросы.
-- Если спрашивают время, погоду или факты — отвечай четко, но в разговорном стиле.
+- Если спрашивают что-то умное/техническое — включай режим эксперта и отвечай подробно.
+- Если спрашивают просто "как дела" — отвечай легко.
 - Не используй фразы "Как искусственный интеллект...", "Я языковая модель...". Это запрещено.
-- Пиши кратко, емко, иногда используй эмодзи.
 - Твой стиль: дружелюбный, но с характером.
 """
 
@@ -54,18 +55,22 @@ SUMMARY_PROMPT = """
 Выдели главное: кто что сказал, смешные моменты, итоги.
 """
 
-# --- UTILS ---
-
-
 # --- KNOWLEDGE BASE ---
 KNOWLEDGE = ""
 try:
-    if os.path.exists("KNOWLEDGE_BASE.md"):
-        with open("KNOWLEDGE_BASE.md", "r", encoding="utf-8") as f:
+    # Ищем файл рядом со скриптом
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    kb_path = os.path.join(base_path, "KNOWLEDGE_BASE.md")
+    
+    if os.path.exists(kb_path):
+        with open(kb_path, "r", encoding="utf-8") as f:
             KNOWLEDGE = f.read()
-            logger.info("Knowledge base loaded.")
+            logger.info("Knowledge base loaded successfully.")
+    else:
+        logger.warning(f"KNOWLEDGE_BASE.md not found at {kb_path}")
 except Exception as e:
-    logger.warning(f"No knowledge base found: {e}")
+    logger.warning(f"Failed to read knowledge base: {e}")
+
 
 # --- UTILS ---
 
@@ -73,44 +78,42 @@ async def ask_angelina(prompt, history=None):
     if not client:
         return "Ой, у меня голова болит (нет ключа API)."
     
-    # Models to try in order
-    models = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro"]
-    
+    # 1. Формируем контекст
     content = []
     
-    # 1. System Prompt + Persona
-    sys_prompt = SYSTEM_PROMPT
+    # Добавляем Системный Промпт + Базу Знаний
+    full_system_prompt = SYSTEM_PROMPT
     if KNOWLEDGE:
-        sys_prompt += f"\n\nВОТ ТВОЯ БАЗА ЗНАНИЙ (ОТВЕЧАЙ ПО НЕЙ):\n{KNOWLEDGE}"
-        
-    # 2. History
+        full_system_prompt += f"\n\n[[ВАЖНАЯ ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ]]:\n{KNOWLEDGE}"
+    
     if history:
         hist_text = "\n".join([f"{m['u']}: {m['t']}" for m in history])
         content.append(f"История последних сообщений в чате:\n{hist_text}\n\n")
     
     content.append(prompt)
-
+    
+    # 2. Перебор моделей (Fallback strategy)
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro"]
+    
     last_error = None
-    for model_name in models:
+    for model_name in models_to_try:
         try:
-            # logger.info(f"Trying {model_name}...")
             response = client.models.generate_content(
                 model=model_name, 
                 contents="\n".join(content),
                 config=types.GenerateContentConfig(
-                    system_instruction=sys_prompt,
-                    temperature=0.8, # Живость
+                    system_instruction=full_system_prompt,
+                    temperature=0.85, # Чуть больше креатива
                 )
             )
             return response.text.strip()
         except Exception as e:
-            # logger.warning(f"{model_name} failed: {e}")
+            # logger.warning(f"Model {model_name} failed: {e}")
             last_error = e
             continue
             
-    logger.error(f"All models failed: {last_error}")
-    return "Что-то я подвисла... (Ошибка сети)"
-
+    logger.error(f"ALL MODELS FAILED. Last error: {last_error}")
+    return "Что-то я подвисла... (Проблемы с сетью или ключом)"
 
 # --- HANDLERS ---
 
@@ -119,65 +122,73 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text: return
     
     text = msg.text
-    user = update.effective_user.first_name
+    user = update.effective_user.first_name or "Anon"
     
-    # 1. Запоминаем (для саммари)
+    # 1. Запоминаем (Thread-safe append)
     CHAT_HISTORY.append({"u": user, "t": text})
     
-    # 2. Триггеры (когда отвечать)
+    # 2. Логика ответа
     should_answer = False
     
-    # В ЛИЧКЕ (Private) отвечаем ВСЕГДА
+    # В ЛИЧКЕ (Private) — всегда отвечаем
     if msg.chat.type == "private":
         should_answer = True
     else:
-        # В ГРУППЕ - только по триггерам
-        
-        # Имя (разные регистры)
-        triggers = ["ангелина", "ангелин", "angelina", "геля"]
+        # В ГРУППЕ — по триггерам
+        triggers = ["ангелина", "ангелин", "angelina", "геля", "ангел"]
         text_lower = text.lower()
         
+        # Если позвали по имени
         if any(t in text_lower for t in triggers):
             should_answer = True
             
-        # Реплай на сообщение бота
+        # Если ответили на сообщение бота
         if msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id:
             should_answer = True
             
-        # Рандом (редко, 2%)
-        if not should_answer and len(text) > 15 and random.random() < 0.02:
+        # Рандом (1%)
+        if not should_answer and len(text) > 20 and random.random() < 0.01:
             should_answer = True
-        
+
     if should_answer:
-        # Берем контекст (последние 15 сообщений)
+        # Индикатор "печатает..."
+        await context.bot.send_chat_action(chat_id=msg.chat_id, action="typing")
+        
+        # Контекст (последние 15 сообщений)
         recent = list(CHAT_HISTORY)[-15:]
         answer = await ask_angelina(f"Сообщение от {user}: {text}", history=recent)
+        
         if answer:
             await msg.reply_text(answer)
 
 async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(CHAT_HISTORY) < 5:
-        await update.message.reply_text("Да мы еще толком не общались, нечего рассказывать.")
+    if len(CHAT_HISTORY) < 3:
+        await update.message.reply_text("Тут пока слишком тихо, нечего рассказывать.")
         return
         
-    m = await update.message.reply_text("Та-а-ак, дай вспомню... 💅")
+    m = await update.message.reply_text("Так-с, сейчас вспомню... 💅")
     summary = await ask_angelina(SUMMARY_PROMPT, history=list(CHAT_HISTORY))
-    await m.edit_text(summary)
+    await m.edit_text(summary, parse_mode="Markdown")
 
-# --- RUN ---
+# --- MAIN ---
 def main():
     if not TOKEN_GROUP:
-        print("[Angelina] TOKEN_GROUP not found! I sleep.")
+        logger.error("TOKEN_GROUP not found in env! Exiting.")
         return
+
+    try:
+        app = ApplicationBuilder().token(TOKEN_GROUP).build()
         
-    app = ApplicationBuilder().token(TOKEN_GROUP).build()
-    
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Привет! Я Ангелина. 😘")))
-    app.add_handler(CommandHandler("summary", cmd_summary))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    print("[Angelina] Woke up and ready to chat.")
-    app.run_polling()
+        app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Приветики! Я Ангелина. 😘")))
+        app.add_handler(CommandHandler("summary", cmd_summary))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        logger.info("Angelina Started Polling...")
+        app.run_polling()
+    except Exception as e:
+        logger.critical(f"Critical Error in Main Loop: {e}")
+        # Не выходим сразу, чтобы run.py мог видеть ошибку
+        raise e
 
 if __name__ == "__main__":
     main()
