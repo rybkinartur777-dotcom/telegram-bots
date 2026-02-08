@@ -273,7 +273,6 @@ async def handle_message(message: Message):
                 
 
             # 3. Recognize
-            # Pass original input_path for Gemini (it supports ogg/mp3 directly) and wav_path for legacy
             text, lang, engine = recognize_speech(input_path, wav_path)
             
             if text:
@@ -293,7 +292,8 @@ async def handle_message(message: Message):
                 
                 await status_msg.edit_text(response)
             else:
-                await status_msg.edit_text("Could not recognize speech.")
+                # Если вернулась пустота — значит совсем беда
+                await status_msg.edit_text("❌ Не удалось распознать речь (проверьте логи).")
                 
     except Exception as e:
         print(f"[Error] {e}")
