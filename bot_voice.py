@@ -1,28 +1,38 @@
-
-# Force redeploy trigger
+# Force redeploy trigger (new library migration V2)
 import asyncio
 import os
 import tempfile
-import subprocess
-import time
-from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramRetryAfter
-import speech_recognition as sr
-import shutil
-import concurrent.futures
+import logging
 import re
-from pydub import AudioSegment, effects, silence
-from aiohttp import web
-import google.generativeai as genai
-import pathlib
+from pathlib import Path
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from dotenv import load_dotenv
+
+import speech_recognition as sr
+from pydub import AudioSegment, effects, silence 
+
+# Новая библиотека Google GenAI
+from google import genai
+from google.genai import types
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
+
+TOKEN_VOICE = os.getenv("TOKEN_VOICE")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Инициализация клиента (новая библиотека)
+client = None
+if GEMINI_API_KEY:
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+#         print("[Gemini] Client initialized successfully.")
+    except Exception as e:
+        print(f"[Gemini Error] Initialization failed: {e}")
+else:
+    print("[WARNING] GEMINI_API_KEY not found! High quality recognition disabled.")
 
 
 # ===== FFMPEG SETUP =====
@@ -42,18 +52,6 @@ if FFMPEG_PATH:
     AudioSegment.ffprobe = FFMPEG_PATH
 else:
     print("[WARNING] FFmpeg not found! Voice processing might fail.")
-
-# ===== CONFIG =====
-TOKEN_VOICE = os.getenv("TOKEN_VOICE", "YOUR_TOKEN_HERE")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-gemini_model = None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    # Используем точную версию Flash модели (она поддерживает аудио)
-    gemini_model = genai.GenerativeModel('gemini-1.5-flash-001')
-else:
-    print("[WARNING] GEMINI_API_KEY not found! High quality recognition disabled.")
 
 
 # ===== UTILS =====
@@ -132,42 +130,33 @@ def recognize_gemini(file_path):
     """
     Распознавание через Google Gemini (Бесплатно, качественно, с пунктуацией)
     """
-    if not gemini_model:
+    Распознавание через новый Gemini API (v2 Client).
+    """
+    if not client:
         return None, None
 
     try:
-        # Uploading file to Gemini
-        # Note: In production you might want to manage file deletion lifecycle better
-        # But for this bot standard upload/process is fine
-        print(f"[Gemini] Uploading {file_path}...")
-        sample_file = genai.upload_file(path=file_path, display_name="Voice Message")
+        # Читаем файл как байты
+        with open(file_path, "rb") as f:
+            audio_data = f.read()
+
+        # Новый формат запроса (Part с MIME типом)
+        # Для ogg (voice note) используем audio/ogg
+        mime_type = "audio/ogg" 
+        if file_path.endswith(".mp3"):
+            mime_type = "audio/mp3"
+        elif file_path.endswith(".wav"):
+            mime_type = "audio/wav"
+
+        # Формируем контент
+        prompt = "Transcribe this audio exactly as spoken. Punctuated properly. Do not add any other text."
         
-        # Poll for processing completion
-        while sample_file.state.name == "PROCESSING":
-            time.sleep(1)
-            sample_file = genai.get_file(sample_file.name)
-            
-        if sample_file.state.name == "FAILED":
-            print("[Gemini] File processing failed.")
-            return None, None
-            
-        # Generate content
-        response = gemini_model.generate_content([
-            "Transcribe this audio file exactly as spoken. Punctuate properly. Do not add any other text.",
-            sample_file
-        ])
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[prompt, types.Part.from_bytes(data=audio_data, mime_type=mime_type)]
+        )
         
-        # Cleanup
-        try:
-            genai.delete_file(sample_file.name)
-        except:
-            pass
-            
-        text = response.text.strip()
-        # Simple language detection based on text
-        # (Gemini doesn't return language code directly in simple response)
-        # We'll assume successful recognition implies valid language
-        # You could ask it to output JSON with language, but let's keep it simple
+        text = response.text.strip() if response.text else ""
         lang = "detected" 
         
         return text, lang
@@ -197,16 +186,17 @@ def recognize_google(wav_path, lang="ru-RU"):
 
 def recognize_speech(file_path, wav_path):
     """
-    Smart recognition: Try Gemini (Free High Quality) first, then Google (Legacy)
+    Умный выбор движка:
+    1. Gemini (HQ, пунктуация, бесплатно)
+    2. Google Speech (Legacy, запасной вариант)
     """
-    # 1. Try Gemini (High quality + punctuation + FREE)
-    if gemini_model:
-        print("[Speech] Trying Gemini...")
-        text, lang = recognize_gemini(file_path) # Use original file (ogg/mp3) usually better
+    # 1. Пробуем Gemini (если есть ключ)
+    if client:
+        print("[Speech] Trying Gemini v2...")
+        text, lang = recognize_gemini(file_path) # Для войсов (.oga) Gemini понимает
         if text:
             return text, lang, "gemini"
-            
-    # 2. Fallback to Google Legacy
+        # Если Gemini вернул None (ошибка), идем дальше...2. Fallback to Google Legacy
     print("[Speech] Fallback to Google Legacy...")
     
     # Try Russian first
