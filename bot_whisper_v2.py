@@ -12,13 +12,14 @@ import shutil
 import subprocess
 import whisper
 
-# Ограничение размера видео
+# Ограничение размера видео перед отправкой как "video" (в байтах). Если файл больше — будем транскодить или отправлять как документ.
 MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024  # ~50 MB
 
 TOKEN = "8509159747:AAEj-w7cc5lh35hkHB1rTDNW-Gb139NVcqM"
 
-# Загружаем модель Whisper Small
-print("🔄 Загрузка модели Whisper Small...")
+# Загружаем модель Whisper при старте
+# small - отличный баланс между скоростью и качеством, ДОБАВЛЯЕТ ПУНКТУАЦИЮ!
+print("🔄 Загрузка модели Whisper Small (с пунктуацией)...")
 whisper_model = whisper.load_model("small")
 print("✅ Модель Whisper Small загружена!")
 
@@ -40,168 +41,182 @@ def transliterate(text):
     """Преобразует кириллицу в латиницу"""
     result = []
     for char in text:
-        result.append(TRANSLIT_DICT.get(char, char))
+        if char in TRANSLIT_DICT:
+            result.append(TRANSLIT_DICT[char])
+        else:
+            result.append(char)
     return ''.join(result)
-
-def add_punctuation(text):
-    """Простая расстановка запятых"""
-    text = ' '.join(text.split())
-    
-    # Замены для ключевых слов
-    replacements = {
-        ' потому что ': ', потому что ',
-        ' так как ': ', так как ',
-        ' поэтому ': ', поэтому ',
-        ' если ': ', если ',
-        ' когда ': ', когда ',
-        ' чтобы ': ', чтобы ',
-        ' что ': ', что ',
-        ' где ': ', где ',
-        ' куда ': ', куда ',
-        ' как ': ', как ',
-        ' но ': ', но ',
-        ' а ': ', а ',
-        ' хотя ': ', хотя ',
-        ' который ': ', который ',
-        ' конечно ': ', конечно, ',
-        ' наверное ': ', наверное, ',
-        ' кстати ': ', кстати, ',
-    }
-    
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    
-    # Фразы в начале
-    if text.startswith('привет '):
-        text = 'Привет, ' + text[7:]
-    elif text.startswith('да '):
-        text = 'Да, ' + text[3:]
-    elif text.startswith('нет '):
-        text = 'Нет, ' + text[4:]
-    elif text:
-        text = text[0].upper() + text[1:]
-    
-    # Вопросы
-    for q in ['как дела', 'что делаешь']:
-        if q in text and f'{q},' not in text:
-            text = text.replace(q, f'{q},')
-    
-    # Каждые 6 слов - запятая
-    words = text.split()
-    if len(words) > 7:
-        result = []
-        for i, word in enumerate(words):
-            result.append(word)
-            if (i + 1) % 6 == 0 and i < len(words) - 2:
-                if ',' not in word:
-                    result[-1] = word + ','
-        text = ' '.join(result)
-    
-    # Чистка
-    while ',,' in text:
-        text = text.replace(',,', ',')
-    text = text.replace(', ,', ',')
-    
-    # Точка в конце
-    if text and text[-1] not in '.!?,':
-        text = text + '.'
-    
-    text = text.replace(',.', '.').replace(', .', '.')
-    
-    return text
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 welcome_text = (
     "Добро пожаловать!\n\n"
-    "<b>🎙️ Голосовые сообщения:</b> Пришлите голосовое сообщение или аудиофайл, и я транскрибирую его и выведу транслит\n\n"
+    "<b>🎙️ Голосовые сообщения:</b> Пришлите голосовое сообщение или аудиофайл, и я транскрибирую его с правильной пунктуацией и выведу транслит\n\n"
     "<b>🌐 Медиа из интернета:</b> Вы можете скинуть мне ссылку на пост в <b>Instagram</b>, <b>Pinterest</b> или <b>TikTok</b>, "
     "откуда нужно выгрузить фото, видео и текст — через пару секунд эта фотка или видос будут у вас!\n\n"
-    "На данный момент я поддерживаю фото, видео, карусели из этих платформ."
+    "На данный момент я поддерживаю фото, видео, карусели из этих платформ.\n\n"
+    "✨ <b>Использую Whisper Small AI - с автоматической пунктуацией!</b>"
 )
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(welcome_text)
 
+def add_punctuation_from_segments(segments):
+    """Добавляет пунктуацию на основе пауз между сегментами Whisper"""
+    if not segments:
+        return ""
+    
+    result = []
+    for i, segment in enumerate(segments):
+        text = segment['text'].strip()
+        
+        # Первое слово с заглавной буквы
+        if i == 0 and text:
+            text = text[0].upper() + text[1:]
+        
+        result.append(text)
+        
+        # Добавляем знаки препинания на основе пауз
+        if i < len(segments) - 1:
+            current_end = segment['end']
+            next_start = segments[i + 1]['start']
+            pause = next_start - current_end
+            
+            # Если пауза больше 0.8 секунд - ставим точку
+            if pause > 0.8:
+                result.append('.')
+                # Следующее предложение с заглавной буквы
+                if i + 1 < len(segments):
+                    next_text = segments[i + 1]['text'].strip()
+                    if next_text:
+                        segments[i + 1]['text'] = next_text[0].upper() + next_text[1:]
+            # Если пауза больше 0.3 секунд - ставим запятую
+            elif pause > 0.3:
+                result.append(',')
+        else:
+            # В конце всегда точка
+            result.append('.')
+    
+    # Собираем текст
+    final_text = ' '.join(result)
+    # Убираем лишние пробелы перед знаками препинания
+    final_text = final_text.replace(' ,', ',').replace(' .', '.')
+    return final_text
+
 @dp.message()
 async def handle_voice(message: Message):
     """Обработчик для голосовых сообщений"""
     if message.voice:
         try:
-            status_msg = await message.reply("🔄 Обработка...")
+            status_msg = await message.reply("🔄 Обработка голосового сообщения...")
             
             with tempfile.TemporaryDirectory() as tmpdirname:
+                # Скачиваем голосовой файл
                 voice_file_path = os.path.join(tmpdirname, "voice.ogg")
                 await bot.download(message.voice, destination=voice_file_path)
                 
-                # Конвертируем для Whisper
+                # Whisper работает с разными форматами, но для стабильности конвертируем в mp3
                 audio_path = os.path.join(tmpdirname, "voice.mp3")
+                
+                # Используем ffmpeg для конвертации
                 ffmpeg_path = shutil.which('ffmpeg')
                 if ffmpeg_path:
                     try:
                         subprocess.run([
                             ffmpeg_path, '-y', '-i', voice_file_path,
-                            '-ar', '16000', '-ac', '1', audio_path
+                            '-ar', '16000',  # Whisper предпочитает 16kHz
+                            '-ac', '1',  # Монофайл
+                            audio_path
                         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     except:
+                        # Если конвертация не удалась, используем оригинальный файл
                         audio_path = voice_file_path
                 else:
                     audio_path = voice_file_path
                 
+                # Распознаём речь с Whisper
                 try:
-                    # Распознаём с Whisper
-                    result = whisper_model.transcribe(audio_path, language='ru', fp16=False)
-                    text_raw = result['text'].strip().lower()
+                    result = whisper_model.transcribe(
+                        audio_path, 
+                        language='ru',  # Указываем русский язык для лучшей точности
+                        fp16=False,  # Отключаем fp16 для совместимости с CPU
+                        task='transcribe',  # Задача - транскрибирование
+                        word_timestamps=False  # Получаем сегменты с временными метками
+                    )
                     
-                    # Добавляем пунктуацию
-                    text_punct = add_punctuation(text_raw)
-                    transliterated = transliterate(text_punct)
+                    # Добавляем пунктуацию на основе пауз
+                    if 'segments' in result and result['segments']:
+                        text = add_punctuation_from_segments(result['segments'])
+                    else:
+                        text = result['text'].strip()
+                        # Хотя бы первую букву делаем заглавной и точку в конце
+                        if text:
+                            text = text[0].upper() + text[1:] + '.'
                     
+                    # Переводим в транслит
+                    transliterated = transliterate(text)
+                    
+                    # Отправляем результат
                     result_text = (
-                        f"<b>🎤 Распознано:</b>\n\n"
-                        f"<b>Оригинал:</b>\n{text_punct}\n\n"
+                        f"<b>🎤 Голосовое сообщение распознано:</b>\n\n"
+                        f"<b>Оригинал:</b>\n{text}\n\n"
                         f"<b>Транслит:</b>\n{transliterated}"
                     )
                     
                     await status_msg.edit_text(result_text)
                     
                 except Exception as e:
-                    await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
+                    await status_msg.edit_text(f"❌ Ошибка распознавания: {str(e)}")
                     
         except Exception as e:
-            await message.reply(f"❌ Ошибка: {str(e)}")
+            await message.reply(f"❌ Ошибка при обработке: {str(e)}")
         return
 
     # Обработка аудиофайлов
     if message.audio:
         try:
-            status_msg = await message.reply("🔄 Обработка...")
+            status_msg = await message.reply("🔄 Обработка аудиофайла...")
             
             with tempfile.TemporaryDirectory() as tmpdirname:
+                # Скачиваем аудиофайл
                 audio_file_path = os.path.join(tmpdirname, "audio")
                 await bot.download(message.audio, destination=audio_file_path)
                 
+                # Распознаём речь с Whisper (Whisper может работать с разными форматами)
                 try:
-                    result = whisper_model.transcribe(audio_file_path, language='ru', fp16=False)
-                    text_raw = result['text'].strip().lower()
-                    text_punct = add_punctuation(text_raw)
-                    transliterated = transliterate(text_punct)
+                    result = whisper_model.transcribe(
+                        audio_file_path,
+                        language='ru',
+                        fp16=False,
+                        task='transcribe',
+                        word_timestamps=False
+                    )
+                    
+                    # Добавляем пунктуацию на основе пауз
+                    if 'segments' in result and result['segments']:
+                        text = add_punctuation_from_segments(result['segments'])
+                    else:
+                        text = result['text'].strip()
+                        if text:
+                            text = text[0].upper() + text[1:] + '.'
+                    
+                    transliterated = transliterate(text)
                     
                     result_text = (
-                        f"<b>🎵 Распознано:</b>\n\n"
-                        f"<b>Оригинал:</b>\n{text_punct}\n\n"
+                        f"<b>🎵 Аудиофайл распознан:</b>\n\n"
+                        f"<b>Оригинал:</b>\n{text}\n\n"
                         f"<b>Транслит:</b>\n{transliterated}"
                     )
                     
                     await status_msg.edit_text(result_text)
+                    
                 except Exception as e:
-                    await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
+                    await status_msg.edit_text(f"❌ Ошибка распознавания: {str(e)}")
                     
         except Exception as e:
-            await message.reply(f"❌ Ошибка: {str(e)}")
-        return
+            await message.reply(f"❌ Ошибка при обработке аудиофайла: {str(e)}")
         return
 
 @dp.message()

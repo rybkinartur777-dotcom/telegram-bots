@@ -58,7 +58,7 @@ echo.
 REM Запускаем оба бота в новых окнах
 start "Voice Bot" cmd /k "python bot_voice.py"
 timeout /t 2 /nobreak
-start "Media Bot" cmd /k "python bot_media.py"
+start "Media Bot" cmd /k "python bot_media_local.py"
 
 echo.
 echo ✅ Оба бота запущены!

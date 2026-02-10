@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 import speech_recognition as sr
 from pydub import AudioSegment
+import whisper
 
 # Новая библиотека Google GenAI
 from google import genai
@@ -41,6 +42,11 @@ if GEMINI_API_KEY:
         logger.error(f"[Gemini Error] Initialization failed: {e}")
 else:
     logger.warning("[WARNING] GEMINI_API_KEY not found!")
+
+# Загрузка Whisper
+logger.info("🔄 Loading Whisper Small model...")
+whisper_model = whisper.load_model("small")
+logger.info("✅ Whisper Small loaded!")
 
 # ===== UTILS =====
 
@@ -104,16 +110,36 @@ def recognize_google(wav_path, lang="ru-RU"):
     except:
         return None
 
+async def recognize_whisper(file_path):
+    """Распознавание через Whisper"""
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, 
+            lambda: whisper_model.transcribe(str(file_path), language='ru', fp16=False)
+        )
+        text = result['text'].strip() if result and 'text' in result else ""
+        return text if text else None
+    except Exception as e:
+        logger.error(f"[Whisper Error] {e}")
+        return None
+
 async def recognize_speech(file_path, wav_path):
     """Диспетчер распознавания"""
-    # 1. Gemini
+    # 1. Whisper (Primary)
+    logger.info(f"Trying Whisper for {file_path}")
+    text = await recognize_whisper(file_path)
+    if text:
+        return text, "whisper"
+    
+    # 2. Gemini (Secondary)
     if client:
         logger.info(f"Trying Gemini for {file_path}")
         text, lang = await recognize_gemini(file_path)
         if text:
             return text, "gemini"
     
-    # 2. Google Fallback
+    # 3. Google Fallback
     logger.info("Fallback to Google Legacy")
     loop = asyncio.get_running_loop()
     
@@ -128,10 +154,70 @@ async def recognize_speech(file_path, wav_path):
     return None, None
 
 def add_punctuation(text):
+    """Улучшенная расстановка запятых"""
     if not text: return text
-    t = text.capitalize()
-    if not t.endswith((".", "!", "?")): t += "."
-    return t
+    
+    text = ' '.join(text.lower().split())
+    
+    # Замены для ключевых слов
+    replacements = {
+        ' потому что ': ', потому что ',
+        ' так как ': ', так как ',
+        ' если ': ', если ',
+        ' когда ': ', когда ',
+        ' чтобы ': ', чтобы ',
+        ' что ': ', что ',
+        ' где ': ', где ',
+        ' как ': ', как ',
+        ' но ': ', но ',
+        ' а ': ', а ',
+        ' хотя ': ', хотя ',
+        ' конечно ': ', конечно, ',
+        ' наверное ': ', наверное, ',
+        ' кстати ': ', кстати, ',
+    }
+    
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    
+    # Фразы в начале
+    if text.startswith('привет '):
+        text = 'Привет, ' + text[7:]
+    elif text.startswith('да '):
+        text = 'Да, ' + text[3:]
+    elif text.startswith('нет '):
+        text = 'Нет, ' + text[4:]
+    else:
+        text = text.capitalize()
+    
+    # Вопросы
+    for q in ['как дела', 'что делаешь']:
+        if q in text and f'{q},' not in text:
+            text = text.replace(q, f'{q},')
+    
+    # Каждые 6 слов - запятая
+    words = text.split()
+    if len(words) > 7:
+        result = []
+        for i, word in enumerate(words):
+            result.append(word)
+            if (i + 1) % 6 == 0 and i < len(words) - 2:
+                if ',' not in word:
+                    result[-1] = word + ','
+        text = ' '.join(result)
+    
+    # Чистка
+    while ',,' in text:
+        text = text.replace(',,', ',')
+    text = text.replace(', ,', ',')
+    
+    # Точка в конце
+    if not text.endswith(('.', '!', '?', ',')):
+        text += '.'
+    
+    text = text.replace(',.', '.').replace(', .', '.')
+    
+    return text
 
 # ===== BOT LOGIC =====
 
@@ -168,13 +254,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text, engine = await recognize_speech(input_path, wav_path)
             
             if text:
-                # Format response
-                if engine == "google":
+                # Format response - всегда добавляем пунктуацию
+                if engine in ["google", "whisper"]:
                     text = add_punctuation(text)
                 
                 resp = f"🗣 <b>{text}</b>"
                 if engine == "gemini":
                     resp += "\n\n✨ Gemini (HQ)"
+                elif engine == "whisper":
+                    resp += "\n\n🎯 Whisper"
                 
                 await status.edit_text(resp, parse_mode="HTML")
             else:

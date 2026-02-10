@@ -1,0 +1,9 @@
+aiogram
+python-telegram-bot
+SpeechRecognition
+pydub
+yt-dlp
+python-dotenv
+aiohttp
+openai-whisper
+deepmultilingualpunctuation

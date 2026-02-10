@@ -1,57 +1,52 @@
 
 import subprocess
-import threading
-import sys
 import time
+import sys
+import logging
 
-def run_script(script_name, prefix):
-    """
-    Запускает python скрипт в отдельном процессе и читает его вывод.
-    Если скрипт падает, перезапускает его через 5 секунд.
-    """
-    while True:
-        print(f"[{prefix}] Starting process...")
-        try:
-            # Запуск процесса
-            process = subprocess.Popen(
-                [sys.executable, "-u", script_name], # -u for unbuffered stdout
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                errors='replace' # Игнорировать ошибки кодировки
-            )
-            
-            # Чтение вывода в фоне (через потоки)
-            def stream_reader(pipe, log_prefix):
-                for line in iter(pipe.readline, ''):
-                    print(f"[{log_prefix}] {line.strip()}")
-                pipe.close()
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-            threading.Thread(target=stream_reader, args=(process.stdout, prefix), daemon=True).start()
-            threading.Thread(target=stream_reader, args=(process.stderr, prefix + " ERROR"), daemon=True).start()
-            
-            # Ждем завершения
-            process.wait()
-            
-            print(f"[{prefix}] Process exited with code {process.returncode}. Restarting in 5s...")
-            time.sleep(5)
-            
-        except Exception as e:
-            print(f"[{prefix}] Launcher Error: {e}")
-            time.sleep(5)
+def run_bots():
+    # Файлы для запуска (только голосовой бот)
+    scripts = [
+        (sys.executable, "-u", "bot_voice.py"),
+        # (sys.executable, "-u", "bot_group.py"), # Ангелина выключена (по просьбе)
+    ]
 
-if __name__ == "__main__":
-    # Запускаем два потока, каждый следит за своим ботом
-    t1 = threading.Thread(target=run_script, args=("bot_voice.py", "VoiceBot"))
-    t2 = threading.Thread(target=run_script, args=("bot_group.py", "Angelina"))
+    processes = []
     
-    t1.start()
-    t2.start()
-    
-    # Главный поток просто ждет вечность
+    # 1. Запуск
+    for cmd_parts in scripts:
+        script_name = cmd_parts[-1]
+        logger.info(f"Запускаем {script_name}...")
+        
+        # Запускаем как Child Process
+        p = subprocess.Popen(
+            list(cmd_parts), 
+            stdout=sys.stdout,
+            stderr=sys.stderr
+        )
+        processes.append((p, cmd_parts))
+
+    # 2. Мониторинг (если упал голосовой — рестарт)
     try:
         while True:
-            time.sleep(1)
+            for i, (proc, cmd) in enumerate(processes):
+                if proc.poll() is not None:  # Процесс умер
+                    logger.warning(f"Процесс {cmd[-1]} упал. Перезапуск...")
+                    new_proc = subprocess.Popen(
+                        list(cmd),
+                        stdout=sys.stdout,
+                        stderr=sys.stderr
+                    )
+                    processes[i] = (new_proc, cmd)
+            time.sleep(5)
     except KeyboardInterrupt:
-        print("Stopping all bots...")
+        logger.info("Остановка всех ботов...")
+        for p, _ in processes:
+            p.terminate()
+
+if __name__ == "__main__":
+    run_bots()

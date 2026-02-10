@@ -12,17 +12,14 @@ import shutil
 import subprocess
 import whisper
 
-# Ограничение размера видео
-MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024  # ~50 MB
+MAX_VIDEO_SIZE_BYTES = 50 * 1024 * 1024
 
 TOKEN = "8509159747:AAEj-w7cc5lh35hkHB1rTDNW-Gb139NVcqM"
 
-# Загружаем модель Whisper Small
-print("🔄 Загрузка модели Whisper Small...")
+print("🔄 Загрузка модели Whisper Small (лучше для длинных аудио)...")
 whisper_model = whisper.load_model("small")
 print("✅ Модель Whisper Small загружена!")
 
-# Таблица транслитерации русских букв в латиницу
 TRANSLIT_DICT = {
     'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh',
     'з': 'z', 'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o',
@@ -37,17 +34,18 @@ TRANSLIT_DICT = {
 }
 
 def transliterate(text):
-    """Преобразует кириллицу в латиницу"""
     result = []
     for char in text:
         result.append(TRANSLIT_DICT.get(char, char))
     return ''.join(result)
 
 def add_punctuation(text):
-    """Простая расстановка запятых"""
+    """Простая и надежная расстановка запятых"""
+    
+    # Убираем лишние пробелы
     text = ' '.join(text.split())
     
-    # Замены для ключевых слов
+    # Заменяем ключевые слова с запятыми (простой подход)
     replacements = {
         ' потому что ': ', потому что ',
         ' так как ': ', так как ',
@@ -63,50 +61,67 @@ def add_punctuation(text):
         ' а ': ', а ',
         ' хотя ': ', хотя ',
         ' который ': ', который ',
+        ' которая ': ', которая ',
         ' конечно ': ', конечно, ',
         ' наверное ': ', наверное, ',
+        ' возможно ': ', возможно, ',
         ' кстати ': ', кстати, ',
+        ' например ': ', например, ',
     }
     
+    # Применяем замены
     for old, new in replacements.items():
         text = text.replace(old, new)
     
-    # Фразы в начале
+    # Специальные фразы в начале
     if text.startswith('привет '):
         text = 'Привет, ' + text[7:]
+    elif text.startswith('здравствуй '):
+        text = 'Здравствуй, ' + text[11:]
     elif text.startswith('да '):
         text = 'Да, ' + text[3:]
     elif text.startswith('нет '):
         text = 'Нет, ' + text[4:]
-    elif text:
-        text = text[0].upper() + text[1:]
+    elif text.startswith('ну '):
+        text = 'Ну, ' + text[3:]
+    else:
+        # Первая буква заглавная
+        if text:
+            text = text[0].upper() + text[1:]
     
-    # Вопросы
-    for q in ['как дела', 'что делаешь']:
-        if q in text and f'{q},' not in text:
+    # Фразы вопросов - добавляем запятую после
+    questions = ['как дела', 'как ты', 'что делаешь', 'как твои дела']
+    for q in questions:
+        if q in text and not f'{q},' in text:
             text = text.replace(q, f'{q},')
     
-    # Каждые 6 слов - запятая
+    # Каждые 6-7 слов добавляем запятую
     words = text.split()
     if len(words) > 7:
         result = []
         for i, word in enumerate(words):
             result.append(word)
+            # Каждые 6 слов ставим запятую
             if (i + 1) % 6 == 0 and i < len(words) - 2:
+                # Проверяем, нет ли уже запятой
                 if ',' not in word:
                     result[-1] = word + ','
         text = ' '.join(result)
     
-    # Чистка
+    # Убираем двойные запятые
     while ',,' in text:
         text = text.replace(',,', ',')
+    
+    # Убираем ", ," 
     text = text.replace(', ,', ',')
     
     # Точка в конце
     if text and text[-1] not in '.!?,':
         text = text + '.'
     
-    text = text.replace(',.', '.').replace(', .', '.')
+    # Убираем запятую перед точкой
+    text = text.replace(',.', '.')
+    text = text.replace(', .', '.')
     
     return text
 
@@ -115,10 +130,9 @@ dp = Dispatcher()
 
 welcome_text = (
     "Добро пожаловать!\n\n"
-    "<b>🎙️ Голосовые сообщения:</b> Пришлите голосовое сообщение или аудиофайл, и я транскрибирую его и выведу транслит\n\n"
-    "<b>🌐 Медиа из интернета:</b> Вы можете скинуть мне ссылку на пост в <b>Instagram</b>, <b>Pinterest</b> или <b>TikTok</b>, "
-    "откуда нужно выгрузить фото, видео и текст — через пару секунд эта фотка или видос будут у вас!\n\n"
-    "На данный момент я поддерживаю фото, видео, карусели из этих платформ."
+    "<b>🎙️ Голосовые сообщения:</b> Добавлю пунктуацию!\n\n"
+    "<b>🌐 Медиа:</b> Instagram, Pinterest, TikTok\n\n"
+    "✨ <b>Умная расстановка запятых!</b>"
 )
 
 @dp.message(CommandStart())
@@ -127,7 +141,6 @@ async def cmd_start(message: Message):
 
 @dp.message()
 async def handle_voice(message: Message):
-    """Обработчик для голосовых сообщений"""
     if message.voice:
         try:
             status_msg = await message.reply("🔄 Обработка...")
@@ -136,7 +149,6 @@ async def handle_voice(message: Message):
                 voice_file_path = os.path.join(tmpdirname, "voice.ogg")
                 await bot.download(message.voice, destination=voice_file_path)
                 
-                # Конвертируем для Whisper
                 audio_path = os.path.join(tmpdirname, "voice.mp3")
                 ffmpeg_path = shutil.which('ffmpeg')
                 if ffmpeg_path:
@@ -151,12 +163,16 @@ async def handle_voice(message: Message):
                     audio_path = voice_file_path
                 
                 try:
-                    # Распознаём с Whisper
                     result = whisper_model.transcribe(audio_path, language='ru', fp16=False)
                     text_raw = result['text'].strip().lower()
                     
+                    print(f"DEBUG - Исходный текст: '{text_raw}'")
+                    
                     # Добавляем пунктуацию
                     text_punct = add_punctuation(text_raw)
+                    
+                    print(f"DEBUG - После пунктуации: '{text_punct}'")
+                    
                     transliterated = transliterate(text_punct)
                     
                     result_text = (
@@ -166,15 +182,12 @@ async def handle_voice(message: Message):
                     )
                     
                     await status_msg.edit_text(result_text)
-                    
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
-                    
         except Exception as e:
             await message.reply(f"❌ Ошибка: {str(e)}")
         return
 
-    # Обработка аудиофайлов
     if message.audio:
         try:
             status_msg = await message.reply("🔄 Обработка...")
@@ -198,131 +211,76 @@ async def handle_voice(message: Message):
                     await status_msg.edit_text(result_text)
                 except Exception as e:
                     await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
-                    
         except Exception as e:
             await message.reply(f"❌ Ошибка: {str(e)}")
-        return
         return
 
 @dp.message()
 async def handle_message(message: Message):
-
-    allowed_domains = [
-        'instagram.com', 'www.instagram.com',
-        'pinterest.com', 'www.pinterest.com', 'pin.it',
-        'tiktok.com', 'www.tiktok.com'
-    ]
+    allowed_domains = ['instagram.com', 'www.instagram.com', 'pinterest.com', 'www.pinterest.com', 
+                       'pin.it', 'tiktok.com', 'www.tiktok.com']
     if not message.text or not ('http://' in message.text or 'https://' in message.text):
-        return  # Просто игнорируем сообщения без ссылок
-
+        return
+    
     url = message.text.strip()
-    # Проверяем, есть ли разрешённый домен в ссылке
     if not any(domain in url.lower() for domain in allowed_domains):
-        return  # Не реагируем на другие ссылки или текст
-
-    status_msg = await message.reply("Обработка ссылки, подождите...")
-
+        return
+    
+    status_msg = await message.reply("Обработка...")
+    
     try:
         with tempfile.TemporaryDirectory() as tmpdirname:
             media_group = []
-            caption = ""
-
-            # Извлекаем только информацию (без скачивания видео)
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'skip_download': True,  # не скачиваем видео
-                'format': 'bestvideo+bestaudio/best',  # максимальное качество
-                'merge_output_format': 'mp4',
-            }
+            
+            ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True, 
+                       'format': 'bestvideo+bestaudio/best', 'merge_output_format': 'mp4'}
             with YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-
-            # Не используем подпись (caption) вообще
-            caption = ""
-
-            # Специальный блок для Pinterest — прямое скачивание фото
+            
             if 'pin.it' in url or 'pinterest' in url.lower():
                 images = info.get('images', [])
                 if not images:
-                    await status_msg.edit_text("Не удалось найти фото в этом пине (возможно, приватный пост).")
+                    await status_msg.edit_text("Не удалось найти фото.")
                     return
                 for i, img in enumerate(images[:10]):
                     img_url = img.get('url') or img.get('src') or img.get('original')
-                    if not img_url:
-                        continue
-                    filename = os.path.join(tmpdirname, f"pin_{i}.jpg")
-                    urllib.request.urlretrieve(img_url, filename)
-                    media_group.append(InputMediaPhoto(media=FSInputFile(filename)))
+                    if img_url:
+                        filename = os.path.join(tmpdirname, f"pin_{i}.jpg")
+                        urllib.request.urlretrieve(img_url, filename)
+                        media_group.append(InputMediaPhoto(media=FSInputFile(filename)))
             else:
-                # Для TikTok/Instagram — скачиваем нормально
                 ydl_opts['skip_download'] = False
                 ydl_opts['outtmpl'] = os.path.join(tmpdirname, '%(id)s.%(ext)s')
-                ydl_opts['format'] = 'bestvideo+bestaudio/best'  # максимальное качество
-                ydl_opts['merge_output_format'] = 'mp4'
                 with YoutubeDL(ydl_opts) as ydl:
                     ydl.download([url])
-
+                
                 for file in os.listdir(tmpdirname):
                     file_path = os.path.join(tmpdirname, file)
                     if file.lower().endswith(('.mp4', '.webm', '.mov')):
-                        # Проверяем размер и при необходимости транскодируем через ffmpeg
                         size = os.path.getsize(file_path)
-                        sent = False
-
                         if size <= MAX_VIDEO_SIZE_BYTES:
                             await message.answer_video(video=FSInputFile(file_path), supports_streaming=True)
-                            sent = True
                         else:
-                            # пытаемся транскодировать при наличии ffmpeg
-                            ffmpeg_path = shutil.which('ffmpeg')
-                            if ffmpeg_path:
-                                # Попробуем несколько значений CRF для баланса качества/размера
-                                for crf in (18, 20, 23, 28):
-                                    transcoded = os.path.join(tmpdirname, f"transcoded_{crf}.mp4")
-                                    try:
-                                        subprocess.run([
-                                            ffmpeg_path, '-y', '-i', file_path,
-                                            '-c:v', 'libx264', '-crf', str(crf), '-preset', 'medium',
-                                            '-c:a', 'aac', '-b:a', '128k', transcoded
-                                        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                                    except Exception:
-                                        continue
-
-                                    if os.path.exists(transcoded):
-                                        new_size = os.path.getsize(transcoded)
-                                        if new_size <= MAX_VIDEO_SIZE_BYTES:
-                                            await message.answer_video(video=FSInputFile(transcoded), supports_streaming=True)
-                                            sent = True
-                                            break
-                                # если не удалось уменьшить до лимита, отправляем крупный файл как документ
-                            if not sent:
-                                await message.answer_document(document=FSInputFile(file_path))
-                                sent = True
-
-                        if sent:
-                            await status_msg.delete()
-                            return
+                            await message.answer_document(document=FSInputFile(file_path))
+                        await status_msg.delete()
+                        return
                     else:
                         media_group.append(InputMediaPhoto(media=FSInputFile(file_path)))
-
+            
             if not media_group:
-                await status_msg.edit_text("Не удалось найти медиа по этой ссылке.")
+                await status_msg.edit_text("Не удалось найти медиа.")
                 return
-
-
-
+            
             if len(media_group) == 1:
                 file_path = media_group[0].media
                 await message.answer_photo(photo=file_path)
                 await message.answer_document(document=file_path)
             else:
                 await message.answer_media_group(media=media_group)
-
+            
             await status_msg.delete()
-
     except Exception as e:
-        await status_msg.edit_text(f"Ошибка обработки: {e}\nПопробуйте другую ссылку или обновите yt-dlp.")
+        await status_msg.edit_text(f"Ошибка: {e}")
 
 async def main():
     print("Бот запущен и готов!")
