@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 
 import speech_recognition as sr
 from pydub import AudioSegment
-import whisper
 
 # Новая библиотека Google GenAI
 from google import genai
@@ -43,11 +42,6 @@ if GEMINI_API_KEY:
 else:
     logger.warning("[WARNING] GEMINI_API_KEY not found!")
 
-# Загрузка Whisper
-logger.info("🔄 Loading Whisper Small model...")
-whisper_model = whisper.load_model("small")
-logger.info("✅ Whisper Small loaded!")
-
 # ===== UTILS =====
 
 async def recognize_gemini(file_path):
@@ -68,7 +62,7 @@ async def recognize_gemini(file_path):
         elif file_str.endswith(".wav"):
             mime_type = "audio/wav"
 
-        prompt = "Transcribe this audio exactly as spoken. Punctuated properly. Do not add any other text."
+        prompt = "Transcribe this audio exactly as spoken. Add proper Russian punctuation. Do not add any other text."
         
         # Список моделей для перебора
         models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-pro"]
@@ -76,7 +70,6 @@ async def recognize_gemini(file_path):
         last_error = None
         for model_name in models_to_try:
             try:
-                # logger.info(f"Attempting {model_name}...")
                 response = client.models.generate_content(
                     model=model_name,
                     contents=[
@@ -87,7 +80,6 @@ async def recognize_gemini(file_path):
                 text = response.text.strip() if response.text else ""
                 return text, "detected"
             except Exception as e:
-                # logger.warning(f"{model_name} failed: {e}")
                 last_error = e
                 continue
         
@@ -110,36 +102,16 @@ def recognize_google(wav_path, lang="ru-RU"):
     except:
         return None
 
-async def recognize_whisper(file_path):
-    """Распознавание через Whisper"""
-    try:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, 
-            lambda: whisper_model.transcribe(str(file_path), language='ru', fp16=False)
-        )
-        text = result['text'].strip() if result and 'text' in result else ""
-        return text if text else None
-    except Exception as e:
-        logger.error(f"[Whisper Error] {e}")
-        return None
-
 async def recognize_speech(file_path, wav_path):
     """Диспетчер распознавания"""
-    # 1. Whisper (Primary)
-    logger.info(f"Trying Whisper for {file_path}")
-    text = await recognize_whisper(file_path)
-    if text:
-        return text, "whisper"
-    
-    # 2. Gemini (Secondary)
+    # 1. Gemini (Primary)
     if client:
         logger.info(f"Trying Gemini for {file_path}")
         text, lang = await recognize_gemini(file_path)
         if text:
             return text, "gemini"
     
-    # 3. Google Fallback
+    # 2. Google Fallback
     logger.info("Fallback to Google Legacy")
     loop = asyncio.get_running_loop()
     
@@ -222,7 +194,7 @@ def add_punctuation(text):
 # ===== BOT LOGIC =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Voice Bot V2 (New Lib) ready!\nSend me voice messages.")
+    await update.message.reply_text("Voice Bot ready!\nSend me voice messages.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("🎧 Listening...")
@@ -247,7 +219,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await new_file.download_to_drive(input_path)
             
             # Convert to WAV (always needed for fallback)
-            # Use pydub to convert input to wav
             sound = AudioSegment.from_file(str(input_path))
             sound.export(str(wav_path), format="wav")
             
@@ -255,14 +226,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if text:
                 # Format response - всегда добавляем пунктуацию
-                if engine in ["google", "whisper"]:
+                if engine == "google":
                     text = add_punctuation(text)
                 
                 resp = f"🗣 <b>{text}</b>"
                 if engine == "gemini":
                     resp += "\n\n✨ Gemini (HQ)"
-                elif engine == "whisper":
-                    resp += "\n\n🎯 Whisper"
                 
                 await status.edit_text(resp, parse_mode="HTML")
             else:
