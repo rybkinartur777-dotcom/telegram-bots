@@ -187,7 +187,6 @@ async def voice_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #  MEDIA BOT (aiogram + polling)
 # ========================================
 
-media_bot = AiogramBot(token=TOKEN_MEDIA, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 media_dp = AiogramDispatcher()
 
 
@@ -273,9 +272,10 @@ async def media_handle(message: AiogramMessage):
 def run_media_bot():
     """Запускает Media Bot polling в отдельном event loop / потоке"""
     async def _run():
-        await media_bot.delete_webhook(drop_pending_updates=True)
+        bot = AiogramBot(token=TOKEN_MEDIA, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        await bot.delete_webhook(drop_pending_updates=True)
         logger.info("[Media Bot] Webhook сброшен, polling...")
-        await media_dp.start_polling(media_bot)
+        await media_dp.start_polling(bot)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
