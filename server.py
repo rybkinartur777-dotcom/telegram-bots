@@ -173,8 +173,7 @@ async def voice_handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"[Fallback] {e}")
 
             if text:
-                label = "✨ Gemini" if engine == "gemini" else "🔤 Google"
-                await status.edit_text(f"🗣 <b>{text}</b>\n\n<i>{label}</i>", parse_mode="HTML")
+                await status.edit_text(f"🗣 <b>{text}</b>", parse_mode="HTML")
             else:
                 await status.edit_text("❌ Не удалось распознать речь.")
 
