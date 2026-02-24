@@ -5,3 +5,4 @@ pydub
 yt-dlp
 python-dotenv
 aiohttp
+google-genai
