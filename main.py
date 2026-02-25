@@ -197,7 +197,12 @@ async def run_voice_bot():
     ))
 
     voice_logger.info("🎙️ Voice Bot запускается...")
-    await app.run_polling(drop_pending_updates=True)
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        voice_logger.info("Voice Bot polling ✅")
+        # Ждём пока задача не будет отменена
+        await asyncio.Event().wait()
 
 
 # ===================== MEDIA BOT =====================
